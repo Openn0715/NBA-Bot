@@ -3,3 +3,4 @@ requests
 nba_api
 streamlit
 matplotlib
+scipy
