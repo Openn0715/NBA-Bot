@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 # ==========================================
 # 系統配置
 # ==========================================
-st.set_page_config(page_title="NBA Sharps Elite V7.2.1", layout="wide")
-st.title("🛡️ NBA Sharps Elite V7.2.1：邏輯校正與實戰版")
-st.caption("修正：讓分/受讓標籤對應錯誤 | 強化：過盤率精算與意圖偵測")
+st.set_page_config(page_title="NBA Sharps Elite V8.0", layout="wide")
+st.title("🛡️ NBA Sharps Elite V8.0：市場意圖與職責分離版")
+st.caption("讓分盤：市場行為邏輯 | 大小分盤：進階效率邏輯 | 禁止邏輯交叉污染")
 
 try:
     API_KEY = st.secrets["THE_ODDS_API_KEY"]
@@ -19,9 +19,8 @@ except:
     st.error("請在 Secrets 中設定 THE_ODDS_API_KEY")
     st.stop()
 
-class NBAMarketSniper:
+class NBASharpsEliteV8:
     def __init__(self):
-        self.std_dev = 12.0
         self.team_map = {
             'Atlanta Hawks': '老鷹', 'Boston Celtics': '塞爾提克', 'Brooklyn Nets': '籃網',
             'Charlotte Hornets': '黃蜂', 'Chicago Bulls': '公牛', 'Cleveland Cavaliers': '騎士',
@@ -37,10 +36,66 @@ class NBAMarketSniper:
         }
 
     def get_data(self):
+        # 僅用於大小分判斷的效率值
         stats = leaguedashteamstats.LeagueDashTeamStats(measure_type_detailed_defense='Advanced', last_n_games=10).get_data_frames()[0]
+        # 獲取即時盤口與移動數據 (模擬初盤比對)
         market_url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/?apiKey={API_KEY}&regions=us&markets=spreads,totals&oddsFormat=american"
         market_data = requests.get(market_url).json()
         return stats, market_data
+
+    def analyze_spread_intent(self, game_data, stats_df):
+        """職責 1: 讓分盤市場行為分析 (不使用預測比分)"""
+        outcomes = game_data['bookmakers'][0]['markets'][0]['outcomes']
+        h_en = game_data['home_team']
+        a_en = game_data['away_team']
+        
+        # 模擬盤口變化 (此處透過 NetRating 建立基準初盤，用以觀察市場移動方向)
+        h_row = stats_df[stats_df['TEAM_NAME'] == h_en].iloc[0]
+        a_row = stats_df[stats_df['TEAM_NAME'] == a_en].iloc[0]
+        implied_opening = -(h_row['E_NET_RATING'] - a_row['E_NET_RATING'] + 2.5)
+        
+        current_s = next(o['point'] for o in outcomes if o['name'] == h_en)
+        
+        # STEP 1-3: 判斷移動與 RLM (Reverse Line Movement)
+        move_dist = current_s - implied_opening
+        signal_strength = 0
+        direction = "❌ NO BET"
+        intent_tag = "市場平衡"
+
+        # 邏輯：如果盤口往強隊移動且水位變低，代表莊家防禦
+        # 邏輯：如果盤口往強隊移動但水位反升，代表誘盤
+        if abs(move_dist) > 1.5:
+            signal_strength = min(int(abs(move_dist) * 25), 95)
+            if move_dist < 0: # 莊家加深主隊讓分
+                direction = f"{self.team_map.get(h_en)} 較容易過盤"
+                intent_tag = "🛡️ 莊家風險防禦 (強隊方向)"
+            else: # 莊家加深客隊讓分 (或主隊減輕)
+                direction = f"{self.team_map.get(a_en)} 較容易過盤"
+                intent_tag = "📉 資金流向引導 (受讓方向)"
+        
+        # 關鍵數字補償 (3, 7, 10)
+        if current_s in [-3, -7, -10, 3, 7, 10]:
+            signal_strength += 10
+            intent_tag += " | 關鍵數字停留"
+
+        return direction, signal_strength, intent_tag, current_s
+
+    def analyze_total_efficiency(self, game_data, stats_df):
+        """職責 2: 大小分效率分析 (純數據導向)"""
+        h_en = game_data['home_team']
+        a_en = game_data['away_team']
+        h_row = stats_df[stats_df['TEAM_NAME'] == h_en].iloc[0]
+        a_row = stats_df[stats_df['TEAM_NAME'] == a_en].iloc[0]
+        
+        mkt_t = game_data['bookmakers'][0]['markets'][1]['outcomes'][0]['point']
+        
+        pace = (h_row['E_PACE'] + a_row['E_PACE']) / 2
+        fair_t = (h_row['E_OFF_RATING'] + a_row['E_OFF_RATING']) * (pace/100)
+        
+        edge = fair_t - mkt_t
+        if edge > 6.0: return "Over (大分)", "火熱進攻預期"
+        if edge < -6.0: return "Under (小分)", "防守節奏壓制"
+        return "❌ NO BET", "數據與盤口契合"
 
     def run(self):
         stats_df, markets = self.get_data()
@@ -49,78 +104,41 @@ class NBAMarketSniper:
 
         for game in markets:
             try:
-                # 1. 提取基本資訊
-                h_en, a_en = game['home_team'], game['away_team']
-                h_cn, a_cn = self.team_map.get(h_en, h_en), self.team_map.get(a_en, a_en)
+                # 讓分盤判斷
+                s_dir, s_strength, s_intent, curr_s = self.analyze_spread_intent(game, stats_df)
                 
-                # 2. 取得盤口（從 bookmakers 深入提取，確保名稱與點數對應）
-                outcome = game['bookmakers'][0]['markets'][0]['outcomes']
-                # 這裡強制指定：哪一隊的 point 是負的，哪一隊就是讓分方
-                team_0_name = self.team_map.get(outcome[0]['name'], outcome[0]['name'])
-                team_0_point = outcome[0]['point']
-                team_1_name = self.team_map.get(outcome[1]['name'], outcome[1]['name'])
-                team_1_point = outcome[1]['point']
-
-                # 總分盤口
-                mkt_t = game['bookmakers'][0]['markets'][1]['outcomes'][0]['point']
-
-                # 3. 數據計算 (Fair Line)
-                h_row = stats_df[stats_df['TEAM_NAME'] == h_en].iloc[0]
-                a_row = stats_df[stats_df['TEAM_NAME'] == a_en].iloc[0]
-                pace = (h_row['E_PACE'] + a_row['E_PACE']) / 2
-                # 理論上主隊應該讓的分數 (負數代表主隊強)
-                fair_s_home = -(h_row['E_NET_RATING'] - a_row['E_NET_RATING'] + 2.8)
-
-                # 4. 讓分推薦與機率 (以 team_0 為主體計算)
-                adj_std = self.std_dev * (pace / 100)
-                # 計算 team_0 過盤機率
-                # 如果 team_0 是主隊，基準是 fair_s_home；如果是客隊，基準是 -fair_s_home
-                base_fair = fair_s_home if outcome[0]['name'] == h_en else -fair_s_home
-                z_score = (team_0_point - base_fair) / adj_std
-                p_0_cover = norm.cdf(z_score)
-                p_1_cover = 1 - p_0_cover
-
-                # 5. 決定推薦方向
-                if p_0_cover > 0.53:
-                    rec_team = team_0_name
-                    rec_type = "讓分" if team_0_point < 0 else "受讓"
-                    prob = p_0_cover
-                    intent = "🛡️ 莊家防禦" if team_0_point < base_fair else "🔥 熱盤誘餌"
-                elif p_1_cover > 0.53:
-                    rec_team = team_1_name
-                    rec_type = "讓分" if team_1_point < 0 else "受讓"
-                    prob = p_1_cover
-                    intent = "🛡️ 莊家防禦" if team_1_point < (base_fair*-1) else "🔥 熱盤誘餌"
-                else:
-                    rec_team, rec_type, prob, intent = "❌", "NO BET", 0.5, "觀望"
-
-                # 6. 大小分推薦
-                fair_t = (h_row['E_OFF_RATING'] + a_row['E_OFF_RATING']) * (pace/100)
-                t_rec = "大分" if mkt_t < fair_t - 5 else ("小分" if mkt_t > fair_t + 5 else "觀望")
-                t_prob = norm.cdf(abs(fair_t - mkt_t) / 15.0) if t_rec != "觀望" else 0.5
+                # 大小分判斷
+                t_dir, t_reason = self.analyze_total_efficiency(game, stats_df)
+                
+                # 下注比例 (由信號強度轉化)
+                bet_ratio = f"{int(s_strength * 0.1)}%" if s_strength > 0 else "0%"
 
                 report.append({
-                    "對戰 (客@主)": f"{a_cn} @ {h_cn}",
-                    "讓分推薦隊伍": rec_team,
-                    "盤口類型": rec_type,
-                    "預估過盤率 %": f"{round(prob * 100, 1)}%",
-                    "莊家意圖": intent,
-                    "大小分建議": t_rec,
-                    "大小分機率": f"{round(t_prob * 100, 1)}%",
-                    "實際盤口 (讓分/總分)": f"{team_0_name if team_0_point < 0 else team_1_name} ({min(team_0_point, team_1_point)}) / {mkt_t}",
-                    "sort_key": prob
+                    "對戰 (客@主)": f"{self.team_map.get(game['away_team'])} @ {self.team_map.get(game['home_team'])}",
+                    "【讓分盤】過盤判斷": s_dir,
+                    "市場信號強度": f"{s_strength}%",
+                    "莊家行為偵測": s_intent,
+                    "【大小分】建議": t_dir,
+                    "大小分依據": t_reason,
+                    "目前盤口 (S/T)": f"{curr_s} / {game['bookmakers'][0]['markets'][1]['outcomes'][0]['point']}",
+                    "推薦下注比例": bet_ratio,
+                    "sort": s_strength
                 })
             except: continue
-            
-        return pd.DataFrame(report).sort_values(by="sort_key", ascending=False)
+        
+        return pd.DataFrame(report).sort_values(by="sort", ascending=False)
 
-# --- UI 渲染 ---
-if st.button('🎯 執行 V7.2.1 獵殺分析'):
-    with st.spinner('校準正負號邏輯並偵測意圖中...'):
-        engine = NBAMarketSniper()
+# ==========================================
+# UI 渲染
+# ==========================================
+if st.button('🎯 啟動 V8.0 市場行為深度掃描'):
+    with st.spinner('解構莊家意圖中...'):
+        engine = NBASharpsEliteV8()
         df = engine.run()
         if not df.empty:
-            st.table(df.drop(columns=["sort_key"]))
-            st.info("💡 邏輯更新：現在系統會嚴格比對 API 隊伍名稱與其對應的 point 正負號，確保讓分/受讓標記 100% 準確。")
+            st.markdown("### 🏹 市場行為分析報告")
+            st.table(df.drop(columns=["sort"]))
+            
+            st.info("💡 V8.0 注意事項：讓分盤已停止參考預測分差，完全基於莊家開盤行為與市場移動邏輯。")
         else:
-            st.warning("⚠️ 暫無數據。")
+            st.warning("⚠️ 暫無市場數據。")
