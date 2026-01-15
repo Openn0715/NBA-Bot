@@ -1,20 +1,25 @@
 import streamlit as st
 import pandas as pd
 import requests
-import os
 from nba_api.stats.endpoints import leaguedashteamstats, scoreboardv2
 from datetime import datetime, timedelta
 
-# 設置網頁標題與風格
-st.set_page_config(page_title="NBA 量化大師", layout="wide")
+# 1. 網頁配置與風格
+st.set_page_config(page_title="NBA Sharps Pro", layout="wide")
+st.title("🏀 NBA 頂級職業博弈量化報告")
+st.markdown("""
+**系統定位**：Sharps Level (職業級分析)  
+**分析核心**：數據為輔，盤口行為優先。自動偵測誘盤(Trap)與反向走勢(RLM)。
+""")
 
-st.title("🏀 NBA 頂級職業量化分析報告")
-st.caption("自動同步：近 15 場數據、B2B 疲勞修正、主場加成、+EV 方向判定")
+# 從 Secrets 獲取 API Key
+try:
+    API_KEY = st.secrets["THE_ODDS_API_KEY"]
+except:
+    st.error("請在 Streamlit Secrets 中設定 THE_ODDS_API_KEY")
+    st.stop()
 
-# 獲取 API KEY (稍後會在部署平台上設定)
-API_KEY = st.secrets["THE_ODDS_API_KEY"]
-
-class NBA_Web_Analyzer:
+class NBA_Ultimate_Engine:
     def __init__(self):
         self.home_advantage = 2.8
         self.b2b_penalty = 2.5
@@ -32,76 +37,104 @@ class NBA_Web_Analyzer:
             'Washington Wizards': '巫師'
         }
 
-    def fetch_data(self):
-        with st.spinner('⏳ 正在同步 NBA 官網數據...'):
-            raw_stats = leaguedashteamstats.LeagueDashTeamStats(measure_type_detailed_defense='Advanced', last_n_games=15)
-            df_stats = raw_stats.get_data_frames()[0]
-            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-            sb = scoreboardv2.ScoreboardV2(game_date=yesterday)
-            b2b_teams = list(sb.get_data_frames()[1]['TEAM_ABBREVIATION']) if not sb.get_data_frames()[1].empty else []
-            return df_stats, b2b_teams
+    def fetch_nba_stats(self):
+        """獲取官網進階數據與 B2B 狀態"""
+        raw_stats = leaguedashteamstats.LeagueDashTeamStats(measure_type_detailed_defense='Advanced', last_n_games=15)
+        df = raw_stats.get_data_frames()[0]
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        sb = scoreboardv2.ScoreboardV2(game_date=yesterday)
+        b2b = list(sb.get_data_frames()[1]['TEAM_ABBREVIATION']) if not sb.get_data_frames()[1].empty else []
+        return df, b2b
 
-    def get_odds(self):
+    def get_market_data(self):
+        """獲取市場即時盤口"""
         url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/?apiKey={API_KEY}&regions=us&markets=spreads,totals&oddsFormat=american"
         return requests.get(url).json()
 
-    def run(self):
-        df_stats, b2b_list = self.fetch_data()
-        market_data = self.get_odds()
+    def analyze_behavior(self, model_line, current_line, home_team):
+        """市場行為與誘盤判定邏輯"""
+        edge = abs(model_line - current_line)
         
-        results = []
+        # 判定標籤與意圖
+        if edge > 6.0:
+            return "🚨 疑似誘盤 (Trap)", "刻意吸注", "❌ NO BET", "數據優勢過大但盤口未跟進，極大機率存在誘盤風險"
+        elif edge > 3.5:
+            return "✅ 正常移動", "風險控制", "✅ 建議進場", "-"
+        else:
+            return "⚖️ 平衡盤口", "注額平衡", "✅ 觀望", "模型與市場達成共識"
+
+    def run_analysis(self):
+        try:
+            df_stats, b2b_list = self.fetch_nba_stats()
+            market_data = self.get_market_data()
+        except Exception as e:
+            st.error(f"數據掃描失敗: {e}")
+            return pd.DataFrame()
+
+        report = []
         for game in market_data:
             try:
                 h_en, a_en = game['home_team'], game['away_team']
-                h_row = df_stats[df_stats['TEAM_NAME'] == h_en]
-                a_row = df_stats[df_stats['TEAM_NAME'] == a_en]
-                if h_row.empty or a_row.empty: continue
+                h_cn, a_cn = self.team_map.get(h_en, h_en), self.team_map.get(a_en, a_en)
                 
-                h_off, h_def, h_pace = h_row.iloc[0]['E_OFF_RATING'], h_row.iloc[0]['E_DEF_RATING'], h_row.iloc[0]['E_PACE']
-                a_off, a_def, a_pace = a_row.iloc[0]['E_OFF_RATING'], a_row.iloc[0]['E_DEF_RATING'], a_row.iloc[0]['E_PACE']
-                
+                h_data = df_stats[df_stats['TEAM_NAME'] == h_en].iloc[0]
+                a_data = df_stats[df_stats['TEAM_NAME'] == a_en].iloc[0]
+
+                # 數據修正
+                h_off, a_off = h_data['E_OFF_RATING'], a_data['E_OFF_RATING']
                 f_log = "正常"
                 if h_en in b2b_list: h_off -= self.b2b_penalty; f_log = "主B2B"
                 if a_en in b2b_list: a_off -= self.b2b_penalty; f_log = "客B2B"
 
-                h_p = round((( (h_off + a_def) / 2 + self.home_advantage) * ((h_pace + a_pace) / 2)) / 100, 1)
-                a_p = round((( (a_off + h_def) / 2) * ((h_pace + a_pace) / 2)) / 100, 1)
+                # 預測比分運算
+                pace = (h_data['E_PACE'] + a_data['E_PACE']) / 2
+                h_p = round(((h_off + a_data['E_DEF_RATING']) / 2 + self.home_advantage) * pace / 100, 1)
+                a_p = round(((a_off + h_data['E_DEF_RATING']) / 2) * pace / 100, 1)
                 
-                m_spread = round(a_p - h_p, 1)
-                m_total = round(h_p + a_p, 1)
-                
-                mkt_s = game['bookmakers'][0]['markets'][0]['outcomes'][0]['point']
-                mkt_t = game['bookmakers'][0]['markets'][1]['outcomes'][0]['point']
-                
-                s_edge, t_edge = abs(m_spread - mkt_s), abs(m_total - mkt_t)
-                h_cn, a_cn = self.team_map.get(h_en, h_en), self.team_map.get(a_en, a_en)
+                # 公平盤 Fair Line (客減主)
+                model_line = round(a_p - h_p, 1)
+                mkt_spread = game['bookmakers'][0]['markets'][0]['outcomes'][0]['point']
+                mkt_total = game['bookmakers'][0]['markets'][1]['outcomes'][0]['point']
+
+                # 行為分析
+                behavior, intent, action, risk_note = self.analyze_behavior(model_line, mkt_spread, h_cn)
 
                 # 方向判定
-                s_pick = f"{h_cn if m_spread < mkt_s else a_cn} {'讓分' if mkt_s < 0 else '受讓'}勝"
-                t_pick = "全場大分" if m_total > mkt_t else "全場小分"
-
-                rec, target = "✅ 觀望", "-"
-                if s_edge > t_edge:
-                    if s_edge > 5.5: rec = "💰 職業重注"; target = s_pick
-                    elif s_edge > 3.5: rec = "🔥 強烈推薦"; target = s_pick
+                if action != "❌ NO BET":
+                    # 讓分方向
+                    if model_line < mkt_spread:
+                        target = f"{h_cn} {'讓分' if mkt_spread < 0 else '受讓'}勝"
+                    else:
+                        target = f"{a_cn} {'受讓' if mkt_spread < 0 else '讓分'}勝"
                 else:
-                    if t_edge > 8.0: rec = "💰 職業重注"; target = t_pick
-                    elif t_edge > 5.5: rec = "🏀 總分推薦"; target = t_pick
+                    target = "跳過"
 
-                results.append({
+                report.append({
                     "對戰 (客@主)": f"{a_cn} @ {h_cn}",
                     "狀況": f_log,
-                    "預測比分": f"{a_p}:{h_p}",
-                    "偏差(Edge)": max(round(s_edge,1), round(t_edge,1)),
+                    "模型預測": f"{a_p}:{h_p}",
+                    "公平盤/市場": f"{model_line}/{mkt_spread}",
+                    "市場行為": behavior,
+                    "分析建議": action,
                     "具體投注建議": target,
-                    "分析建議": rec
+                    "風險說明": risk_note
                 })
             except: continue
-        return pd.DataFrame(results)
+        return pd.DataFrame(report)
 
-if st.button('🚀 立即掃描最新盤口'):
-    data = NBA_Web_Analyzer().run()
-    if not data.empty:
-        st.table(data)
-    else:
-        st.warning("目前暫無足夠數據。")
+# 介面按鈕
+if st.button('🚀 執行 Sharps Level 全自動量化掃描'):
+    with st.spinner('正在分析莊家意圖與數據指標...'):
+        engine = NBA_Ultimate_Engine()
+        final_df = engine.run_analysis()
+        
+        if not final_df.empty:
+            # 風格處理：將 NO BET 標紅
+            def color_action(val):
+                color = 'red' if val == '❌ NO BET' else ('green' if '✅' in val else 'white')
+                return f'color: {color}'
+            
+            st.table(final_df.style.applymap(color_action, subset=['分析建議']))
+            st.success("掃描完成。請記住：盤口異動優先於預測比分。")
+        else:
+            st.warning("暫無盤口數據，請確認 API 狀態或賽程時間。")
