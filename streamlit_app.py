@@ -28,13 +28,28 @@ class NBASharpsUnifiedElite:
         self.total_trap_limit = 10.0
         self.min_edge_spread = 1.5
         self.min_edge_total = 4.5
-        self.team_map = { # 略，保持原狀 }
+        self.team_map = {
+            'Atlanta Hawks': '老鷹', 'Boston Celtics': '塞爾提克', 'Brooklyn Nets': '籃網',
+            'Charlotte Hornets': '黃蜂', 'Chicago Bulls': '公牛', 'Cleveland Cavaliers': '騎士',
+            'Dallas Mavericks': '獨行俠', 'Denver Nuggets': '金塊', 'Detroit Pistons': '活塞',
+            'Golden State Warriors': '勇士', 'Houston Rockets': '火箭', 'Indiana Pacers': '溜馬',
+            'LA Clippers': '快艇', 'Los Angeles Clippers': '快艇', 'Los Angeles Lakers': '湖人',
+            'Memphis Grizzlies': '灰熊', 'Miami Heat': '熱火', 'Milwaukee Bucks': '公鹿',
+            'Minnesota Timberwolves': '灰狼', 'New Orleans Pelicans': '鵜鶘', 'New York Knicks': '尼克',
+            'Oklahoma City Thunder': '雷霆', 'Orlando Magic': '魔術', 'Philadelphia 76ers': '76人',
+            'Phoenix Suns': '太陽', 'Portland Trail Blazers': '拓荒者', 'Sacramento Kings': '國王',
+            'San Antonio Spurs': '馬刺', 'Toronto Raptors': '暴龍', 'Utah Jazz': '爵士',
+            'Washington Wizards': '巫師'
+        }
 
     def get_data(self):
         stats = leaguedashteamstats.LeagueDashTeamStats(measure_type_detailed_defense='Advanced', last_n_games=15).get_data_frames()[0]
         yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-        sb = scoreboardv2.ScoreboardV2(game_date=yesterday).get_data_frames()[1]
-        b2b_list = list(sb['TEAM_ABBREVIATION']) if not sb.empty else []
+        sb_data = scoreboardv2.ScoreboardV2(game_date=yesterday).get_data_frames()
+        b2b_list = []
+        if len(sb_data) > 1:
+            b2b_list = list(sb_data[1]['TEAM_ABBREVIATION'])
+            
         market_data = requests.get(f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/?apiKey={API_KEY}&regions=us&markets=spreads,totals&oddsFormat=american").json()
         return stats, b2b_list, market_data
 
@@ -48,34 +63,23 @@ class NBASharpsUnifiedElite:
             return "❌ NO BET", "🚨 誘盤風險", "數據極端偏移", "避讓"
 
         # 2. 一致性校驗層 (Consistency Check)
-        # 如果模型預測 A 隊贏球 (ml_winner)，但建議方向卻是買 B 隊「讓分過盤」
-        # 這只有在 B 隊是受讓方且預測輸分小於受讓分時才合理。
-        # 錯誤 Bug 修復點：檢查方向是否背離預測勝負
-        if fair_s < mkt_s: # 建議主隊
+        if fair_s < mkt_s: # 建議方向看好主隊
             recom_winner = "H"
-        else: # 建議客隊
+        else: # 建議方向看好客隊
             recom_winner = "A"
             
-        # 衝突判定：建議「讓分方」過盤，但模型卻預測該隊「輸球」
-        # 如果 mkt_s < 0 代表主讓，mkt_s > 0 代表客讓
+        # 判斷讓分方 (Favorite)
         is_h_fav = mkt_s < 0
         is_conflict = False
         
-        if recom_winner == "H" and not is_h_fav and ml_winner == "A":
-            # 這是主隊「受讓過盤」，模型預測主隊輸球但輸不多，合理。
-            pass
-        elif recom_winner == "H" and is_h_fav and ml_winner == "A":
-            # 這是主隊「讓分過盤」，但模型預測主隊「直接輸球」，嚴重衝突！
+        # 衝突判定：建議「讓分方」過盤，但模型預測該隊「獨贏會輸」
+        if recom_winner == "H" and is_h_fav and ml_winner == "A":
             is_conflict = True
-        elif recom_winner == "A" and is_h_fav and ml_winner == "H":
-            # 這是客隊「受讓過盤」，合理。
-            pass
         elif recom_winner == "A" and not is_h_fav and ml_winner == "H":
-            # 這是客隊「讓分過盤」，但模型預測客隊「直接輸球」，嚴重衝突！
             is_conflict = True
 
         if is_conflict:
-            return "❌ NO BET", "⚠️ 邏輯衝突", "模型預測勝負與讓分方向背離", "跳過"
+            return "❌ NO BET", "⚠️ 邏輯衝突", "勝負預測與讓分過盤方向背離", "跳過"
 
         # 3. CLV 空間檢查
         if edge < self.min_edge_spread:
@@ -91,7 +95,9 @@ class NBASharpsUnifiedElite:
             try:
                 h_en, a_en = game['home_team'], game['away_team']
                 h_cn, a_cn = self.team_map.get(h_en, h_en), self.team_map.get(a_en, a_en)
-                h_row, a_row = stats[stats['TEAM_NAME'] == h_en].iloc[0], stats[stats['TEAM_NAME'] == a_en].iloc[0]
+                
+                h_row = stats[stats['TEAM_NAME'] == h_en].iloc[0]
+                a_row = stats[stats['TEAM_NAME'] == a_en].iloc[0]
 
                 # 計算 Fair Line
                 pace = (h_row['E_PACE'] + a_row['E_PACE']) / 2
@@ -108,7 +114,7 @@ class NBASharpsUnifiedElite:
                 # --- 執行一致性校驗 ---
                 s_status, s_risk, s_reason, s_winner_code = self.unified_decision_logic(fair_s, mkt_s, h_p, a_p)
                 
-                # 大小分處理 (保留原有邏輯)
+                # 大小分處理
                 t_edge = abs(fair_t - mkt_t)
                 if t_edge > self.total_trap_limit:
                     t_status, t_pick = "❌ NO BET", "-"
@@ -120,12 +126,12 @@ class NBASharpsUnifiedElite:
                 # ML 降級校驗
                 ml_recom = (h_cn if h_p > a_p else a_cn)
                 if s_status == "❌ NO BET" and s_risk == "⚠️ 邏輯衝突":
-                    ml_recom = f"僅供參考: {ml_recom}"
+                    ml_recom = f"⚠️僅供參考: {ml_recom}"
 
                 report.append({
                     "對戰 (客@主)": f"{a_cn} @ {h_cn}",
                     "預估比分": f"{a_p}:{h_p}",
-                    "讓分盤推薦": f"{h_cn if s_winner_code=='H' else a_cn} ({'讓分' if (s_winner_code=='H' and mkt_s<0) or (s_winner_code=='A' and mkt_s>0) else '受讓'})過盤" if s_status=="✅ 建議" else "-",
+                    "讓分推薦": f"{h_cn if s_winner_code=='H' else a_cn} ({'讓分' if (s_winner_code=='H' and mkt_s<0) or (s_winner_code=='A' and mkt_s>0) else '受讓'})過盤" if s_status=="✅ 建議" else "-",
                     "讓分狀態": s_status,
                     "讓分風險": s_risk if s_status != "✅ 建議" else s_reason,
                     "大小分建議": t_pick if t_status == "✅ 建議" else "-",
@@ -139,9 +145,10 @@ class NBASharpsUnifiedElite:
 # 介面渲染
 # ==========================================
 if st.button('🚀 執行校驗整合分析'):
-    engine = NBASharpsUnifiedElite()
-    df = engine.run()
-    if not df.empty:
-        st.table(df)
-    else:
-        st.warning("暫無盤口。")
+    with st.spinner('正在檢查數據一致性與過盤邏輯...'):
+        engine = NBASharpsUnifiedElite()
+        df = engine.run()
+        if not df.empty:
+            st.table(df)
+        else:
+            st.warning("目前暫無足夠盤口數據。")
