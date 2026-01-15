@@ -1,1 +1,5 @@
-streamlit, pandas, requests, nba_api, python-dotenv
+streamlit
+pandas
+requests
+nba_api
+python-dotenv
