@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 # ==========================================
 # 系統配置
 # ==========================================
-st.set_page_config(page_title="NBA Sharps Elite V7.2", layout="wide")
-st.title("🛡️ NBA Sharps Elite V7.2：意圖解讀與過盤率精算")
-st.caption("核心：解讀莊家佈局 | 精算動態過盤率 | 實戰投注指南")
+st.set_page_config(page_title="NBA Sharps Elite V7.2.1", layout="wide")
+st.title("🛡️ NBA Sharps Elite V7.2.1：邏輯校正與實戰版")
+st.caption("修正：讓分/受讓標籤對應錯誤 | 強化：過盤率精算與意圖偵測")
 
 try:
     API_KEY = st.secrets["THE_ODDS_API_KEY"]
@@ -21,7 +21,7 @@ except:
 
 class NBAMarketSniper:
     def __init__(self):
-        self.std_dev = 12.0  # NBA 比分差標準差基準
+        self.std_dev = 12.0
         self.team_map = {
             'Atlanta Hawks': '老鷹', 'Boston Celtics': '塞爾提克', 'Brooklyn Nets': '籃網',
             'Charlotte Hornets': '黃蜂', 'Chicago Bulls': '公牛', 'Cleveland Cavaliers': '騎士',
@@ -42,117 +42,85 @@ class NBAMarketSniper:
         market_data = requests.get(market_url).json()
         return stats, market_data
 
-    def calculate_metrics(self, h_en, a_en, mkt_s, mkt_t, stats_df):
-        """核心：計算意圖、推薦與過盤率"""
-        h_row = stats_df[stats_df['TEAM_NAME'] == h_en].iloc[0]
-        a_row = stats_df[stats_df['TEAM_NAME'] == a_en].iloc[0]
-        
-        # 1. 計算數據基準盤 (Fair Line)
-        pace = (h_row['E_PACE'] + a_row['E_PACE']) / 2
-        fair_s = -(h_row['E_NET_RATING'] - a_row['E_NET_RATING'] + 2.8)
-        fair_t = (h_row['E_OFF_RATING'] + a_row['E_OFF_RATING']) * (pace/100)
-        
-        # 2. 讓分盤意圖與推薦
-        adj_std = self.std_dev * (pace / 100)
-        z_score = (mkt_s - fair_s) / adj_std
-        p_home_cover = norm.cdf(z_score)
-        p_away_cover = 1 - p_home_cover
-        
-        # 讓分判斷邏輯
-        s_pick = "-"
-        s_prob = 0.5
-        s_intent = "市場平衡"
-        
-        if p_home_cover > 0.54:
-            s_pick = f"{self.team_map.get(h_en)} 讓分" if mkt_s < 0 else f"{self.team_map.get(h_en)} 受讓"
-            s_prob = p_home_cover
-            s_intent = "🛡️ 莊家防禦盤" if mkt_s < fair_s else "🔥 熱盤誘餌"
-        elif p_away_cover > 0.54:
-            s_pick = f"{self.team_map.get(a_en)} 讓分" if mkt_s > 0 else f"{self.team_map.get(a_en)} 受讓"
-            s_prob = p_away_cover
-            s_intent = "🛡️ 莊家防禦盤" if mkt_s > fair_s else "🔥 熱盤誘餌"
-        else:
-            s_pick = "❌ NO BET"
-            s_prob = 0.5
-            s_intent = "數據高度重合"
-
-        # 3. 大小分意圖與推薦
-        t_pick = "-"
-        t_prob = 0.5
-        t_intent = "平衡"
-        # 模擬總分標準差約 15 分
-        z_t = (fair_t - mkt_t) / 15.0
-        p_over = norm.cdf(z_t) if fair_t > mkt_t else norm.cdf((mkt_t - fair_t) / 15.0)
-        
-        if mkt_t < fair_t - 5:
-            t_pick = "推薦：大分"
-            t_prob = norm.cdf((fair_t - mkt_t) / 15.0)
-            t_intent = "📉 恐慌盤 (低估)"
-        elif mkt_t > fair_t + 5:
-            t_pick = "推薦：小分"
-            t_prob = norm.cdf((mkt_t - fair_t) / 15.0)
-            t_intent = "🚫 過熱盤 (誘導大分)"
-        else:
-            t_pick = "觀望"
-            t_prob = 0.5
-
-        return s_pick, s_intent, s_prob, t_pick, t_intent, t_prob
-
     def run(self):
-        stats, markets = self.get_data()
+        stats_df, markets = self.get_data()
         report = []
         if not markets or "error" in markets: return pd.DataFrame()
 
         for game in markets:
             try:
+                # 1. 提取基本資訊
                 h_en, a_en = game['home_team'], game['away_team']
                 h_cn, a_cn = self.team_map.get(h_en, h_en), self.team_map.get(a_en, a_en)
                 
-                m_data = game['bookmakers'][0]['markets']
-                curr_s = m_data[0]['outcomes'][0]['point']
-                curr_t = m_data[1]['outcomes'][0]['point']
-                
-                s_pick, s_intent, s_prob, t_pick, t_intent, t_prob = self.calculate_metrics(h_en, a_en, curr_s, curr_t, stats)
-                
+                # 2. 取得盤口（從 bookmakers 深入提取，確保名稱與點數對應）
+                outcome = game['bookmakers'][0]['markets'][0]['outcomes']
+                # 這裡強制指定：哪一隊的 point 是負的，哪一隊就是讓分方
+                team_0_name = self.team_map.get(outcome[0]['name'], outcome[0]['name'])
+                team_0_point = outcome[0]['point']
+                team_1_name = self.team_map.get(outcome[1]['name'], outcome[1]['name'])
+                team_1_point = outcome[1]['point']
+
+                # 總分盤口
+                mkt_t = game['bookmakers'][0]['markets'][1]['outcomes'][0]['point']
+
+                # 3. 數據計算 (Fair Line)
+                h_row = stats_df[stats_df['TEAM_NAME'] == h_en].iloc[0]
+                a_row = stats_df[stats_df['TEAM_NAME'] == a_en].iloc[0]
+                pace = (h_row['E_PACE'] + a_row['E_PACE']) / 2
+                # 理論上主隊應該讓的分數 (負數代表主隊強)
+                fair_s_home = -(h_row['E_NET_RATING'] - a_row['E_NET_RATING'] + 2.8)
+
+                # 4. 讓分推薦與機率 (以 team_0 為主體計算)
+                adj_std = self.std_dev * (pace / 100)
+                # 計算 team_0 過盤機率
+                # 如果 team_0 是主隊，基準是 fair_s_home；如果是客隊，基準是 -fair_s_home
+                base_fair = fair_s_home if outcome[0]['name'] == h_en else -fair_s_home
+                z_score = (team_0_point - base_fair) / adj_std
+                p_0_cover = norm.cdf(z_score)
+                p_1_cover = 1 - p_0_cover
+
+                # 5. 決定推薦方向
+                if p_0_cover > 0.53:
+                    rec_team = team_0_name
+                    rec_type = "讓分" if team_0_point < 0 else "受讓"
+                    prob = p_0_cover
+                    intent = "🛡️ 莊家防禦" if team_0_point < base_fair else "🔥 熱盤誘餌"
+                elif p_1_cover > 0.53:
+                    rec_team = team_1_name
+                    rec_type = "讓分" if team_1_point < 0 else "受讓"
+                    prob = p_1_cover
+                    intent = "🛡️ 莊家防禦" if team_1_point < (base_fair*-1) else "🔥 熱盤誘餌"
+                else:
+                    rec_team, rec_type, prob, intent = "❌", "NO BET", 0.5, "觀望"
+
+                # 6. 大小分推薦
+                fair_t = (h_row['E_OFF_RATING'] + a_row['E_OFF_RATING']) * (pace/100)
+                t_rec = "大分" if mkt_t < fair_t - 5 else ("小分" if mkt_t > fair_t + 5 else "觀望")
+                t_prob = norm.cdf(abs(fair_t - mkt_t) / 15.0) if t_rec != "觀望" else 0.5
+
                 report.append({
-                    "讓分推薦 (Cover)": s_pick,
-                    "預估過盤率 %": f"{round(s_prob * 100, 1)}%",
-                    "讓分意圖偵測": s_intent,
-                    "大小分推薦": t_pick,
-                    "大小分勝率": f"{round(t_prob * 100, 1)}%",
-                    "大小分意圖": t_intent,
                     "對戰 (客@主)": f"{a_cn} @ {h_cn}",
-                    "目前盤口 (S/T)": f"{curr_s} / {curr_t}",
-                    "信號強度": int((s_prob - 0.5) * 500)  # 用於排序
+                    "讓分推薦隊伍": rec_team,
+                    "盤口類型": rec_type,
+                    "預估過盤率 %": f"{round(prob * 100, 1)}%",
+                    "莊家意圖": intent,
+                    "大小分建議": t_rec,
+                    "大小分機率": f"{round(t_prob * 100, 1)}%",
+                    "實際盤口 (讓分/總分)": f"{team_0_name if team_0_point < 0 else team_1_name} ({min(team_0_point, team_1_point)}) / {mkt_t}",
+                    "sort_key": prob
                 })
             except: continue
+            
+        return pd.DataFrame(report).sort_values(by="sort_key", ascending=False)
 
-        return pd.DataFrame(report).sort_values(by="信號強度", ascending=False)
-
-# ==========================================
-# UI 渲染
-# ==========================================
-if st.button('🎯 執行意圖與勝率精算分析'):
-    with st.spinner('正在解碼莊家佈局並精算過盤機率...'):
+# --- UI 渲染 ---
+if st.button('🎯 執行 V7.2.1 獵殺分析'):
+    with st.spinner('校準正負號邏輯並偵測意圖中...'):
         engine = NBAMarketSniper()
         df = engine.run()
-        
         if not df.empty:
-            st.markdown("### 🏹 NBA 實戰推薦清單 (依信號強度排序)")
-            
-            # 美化表格顯示
-            display_df = df.drop(columns=["信號強度"])
-            st.table(display_df)
-            
-            st.success("✅ 分析完成！建議優先關注『預估過盤率』超過 58% 且顯示『莊家防禦盤』的場次。")
-            
-            st.markdown("""
-            ---
-            ### 🎓 如何解讀分析結果？
-            1. **預估過盤率 (%)**：基於數據基準線與當前盤口的常態分佈機率。**55% 以上**具備長期投注價值。
-            2. **🛡️ 莊家防禦盤**：代表莊家不惜開出偏離數據的盤口來躲避高手資金，這通常是最穩的方向。
-            3. **🔥 熱盤誘餌**：莊家故意開出「甜頭盤」吸引公眾，若此時過盤率仍高，請確認是否有未公佈的傷病資訊。
-            4. **❌ NO BET**：當數據與盤口完全契合，代表莊家開得很準，沒有任何獲利空間。
-            """)
+            st.table(df.drop(columns=["sort_key"]))
+            st.info("💡 邏輯更新：現在系統會嚴格比對 API 隊伍名稱與其對應的 point 正負號，確保讓分/受讓標記 100% 準確。")
         else:
-            st.warning("⚠️ 暫無盤口數據，請確認 API Key 餘額或開賽時段。")
+            st.warning("⚠️ 暫無數據。")
