@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 # ==========================================
 # 系統配置
 # ==========================================
-st.set_page_config(page_title="NBA Sharps Elite V7.0", layout="wide")
-st.title("🛡️ NBA Sharps Elite V7.0：盤口意圖與市場信號解讀器")
-st.caption("核心轉型：從預測比分轉向解讀莊家行為 | 市場信號強度驅動")
+st.set_page_config(page_title="NBA Sharps Elite V7.1", layout="wide")
+st.title("🛡️ NBA Sharps Elite V7.1：實戰意圖解讀器")
+st.caption("核心：解讀莊家誘盤手法 | 明確下注方向與強度 | 偵測熱盤與騙盤")
 
 try:
     API_KEY = st.secrets["THE_ODDS_API_KEY"]
@@ -19,7 +19,7 @@ except:
     st.error("請在 Secrets 中設定 THE_ODDS_API_KEY")
     st.stop()
 
-class NBAMarketIntentEngine:
+class NBAMarketHunter:
     def __init__(self):
         self.team_map = {
             'Atlanta Hawks': '老鷹', 'Boston Celtics': '塞爾提克', 'Brooklyn Nets': '籃網',
@@ -36,59 +36,57 @@ class NBAMarketIntentEngine:
         }
 
     def get_data(self):
-        # 抓取統計數據作為市場基準 (Benchmarks)
         stats = leaguedashteamstats.LeagueDashTeamStats(measure_type_detailed_defense='Advanced', last_n_games=10).get_data_frames()[0]
-        
-        # 抓取市場數據 (含初盤模擬與即時變動)
-        # 註：The Odds API 的歷史盤口需特定 Endpoint，此處以 V4 即時盤口模擬變化判讀
         market_url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/?apiKey={API_KEY}&regions=us&markets=spreads,totals&oddsFormat=american"
         market_data = requests.get(market_url).json()
-        
         return stats, market_data
 
-    def analyze_market_intent(self, h_en, a_en, mkt_s, mkt_t, stats_df):
-        """核心模組：解讀莊家意圖"""
-        intent_score = 0
-        intent_log = []
-        
-        # 1. 計算統計 Fair Line (作為基準線)
+    def detect_trap(self, h_en, a_en, mkt_s, mkt_t, stats_df):
+        """核心模組：偵測騙盤與熱盤"""
         h_row = stats_df[stats_df['TEAM_NAME'] == h_en].iloc[0]
         a_row = stats_df[stats_df['TEAM_NAME'] == a_en].iloc[0]
         
-        raw_diff = (h_row['E_NET_RATING'] - a_row['E_NET_RATING']) + 2.8 # 基礎實力差
-        fair_s = -raw_diff # 主隊讓分基準
+        # 1. 戰力基準盤
+        fair_s = -(h_row['E_NET_RATING'] - a_row['E_NET_RATING'] + 2.8)
         
-        # 2. 判斷盤口偏離 (错價或意圖)
-        line_offset = mkt_s - fair_s
+        # 2. 讓分盤解讀
+        s_pick = "-"
+        s_trap_type = "正常盤"
+        s_strength = 0
         
-        if abs(line_offset) > 2.5:
-            intent_score += 30
-            intent_log.append(f"莊家異常偏移：現盤 {mkt_s} 與實力面 {round(fair_s,1)} 顯著脫節")
-        
-        # 3. 關鍵數字停靠分析 (Stall Points)
-        critical_numbers = [-3, -5, -7, -10, 3, 5, 7, 10]
-        if mkt_s in critical_numbers:
-            intent_score += 15
-            intent_log.append(f"盤口停靠關鍵心理關口 {mkt_s}，莊家正在此處建立防線")
+        # 若市場盤口顯著優於實力盤，且是熱門球隊 -> 疑似吸注盤 (騙盤)
+        if mkt_s > fair_s + 2.0:
+            s_pick = f"{self.team_map.get(a_en)} 受讓"
+            s_trap_type = "🔥 熱盤誘大眾 (吸注)"
+            s_strength = 75
+        elif mkt_s < fair_s - 2.0:
+            s_pick = f"{self.team_map.get(h_cn)} 讓分"
+            s_trap_type = "🛡️ 莊家防禦盤 (看好強隊)"
+            s_strength = 80
+        else:
+            s_pick = "無明確優勢"
+            s_strength = 20
 
-        # 4. 大小分敘事校驗
+        # 3. 大小分意圖解讀
         avg_pace = (h_row['E_PACE'] + a_row['E_PACE']) / 2
         fair_t = (h_row['E_OFF_RATING'] + a_row['E_OFF_RATING']) * (avg_pace/100)
         
-        t_intent = "中性"
-        if mkt_t > fair_t + 5:
-            t_intent = "過熱"
-            intent_log.append("總分盤被敘事大幅推高，可能存在小分價值")
-        elif mkt_t < fair_t - 5:
-            t_intent = "被低估"
-            intent_log.append("總分盤異常壓低，莊家防範低比分事件")
+        t_pick = "-"
+        t_intent = "平衡"
+        if mkt_t > fair_t + 6:
+            t_pick = "推薦：小分"
+            t_intent = "🚫 過熱盤 (誘導大分)"
+        elif mkt_t < fair_t - 6:
+            t_pick = "推薦：大分"
+            t_intent = "📉 恐慌盤 (誘導小分)"
+        else:
+            t_pick = "觀望"
 
-        return intent_score, intent_log, t_intent
+        return s_pick, s_trap_type, s_strength, t_pick, t_intent
 
     def run(self):
         stats, markets = self.get_data()
         report = []
-
         if not markets or "error" in markets: return pd.DataFrame()
 
         for game in markets:
@@ -96,53 +94,45 @@ class NBAMarketIntentEngine:
                 h_en, a_en = game['home_team'], game['away_team']
                 h_cn, a_cn = self.team_map.get(h_en, h_en), self.team_map.get(a_en, a_en)
                 
-                # 取得即時盤口
                 m_data = game['bookmakers'][0]['markets']
-                current_s = m_data[0]['outcomes'][0]['point']
-                current_t = m_data[1]['outcomes'][0]['point']
+                curr_s = m_data[0]['outcomes'][0]['point']
+                curr_t = m_data[1]['outcomes'][0]['point']
                 
-                # 執行意圖分析
-                strength, logs, t_intent = self.analyze_market_intent(h_en, a_en, current_s, current_t, stats)
-                
-                # 決定信號方向 (哪一方承受壓力/莊家在躲哪一方)
-                # 簡單邏輯：若盤口比實力盤更看好某隊，則該隊為莊家風險區
-                signal_direction = h_cn if current_s < -5 else a_cn 
-                
-                # 若強度太低則輸出 NO BET
-                status = "✅ 值得介入" if strength >= 30 else "❌ NO BET"
+                s_pick, s_trap, strength, t_pick, t_intent = self.detect_trap(h_en, a_en, curr_s, curr_t, stats)
                 
                 report.append({
-                    "市場信號強度 %": strength if status == "✅ 值得介入" else 0,
+                    "市場強度 %": strength,
                     "對戰 (客@主)": f"{a_cn} @ {h_cn}",
-                    "盤口狀態": status,
-                    "莊家行為解讀": " | ".join(logs) if logs else "市場波動平穩，無顯著錯價",
-                    "讓分盤現價": current_s,
-                    "總分盤意圖": t_intent,
-                    "信號方向": signal_direction if status == "✅ 建議" else "-"
+                    "【讓分盤推薦】": s_pick,
+                    "讓分意圖偵測": s_trap,
+                    "【大小分推薦】": t_pick,
+                    "大小分意圖解讀": t_intent,
+                    "當前讓分": curr_s,
+                    "當前總分": curr_t
                 })
             except: continue
 
-        df = pd.DataFrame(report).sort_values(by="市場信號強度 %", ascending=False)
-        return df
+        return pd.DataFrame(report).sort_values(by="市場強度 %", ascending=False)
 
 # ==========================================
 # UI 渲染
 # ==========================================
-if st.button('🚀 執行盤口意圖掃描 (V7.0)'):
-    with st.spinner('正在分析盤口動態與莊家風險佈局...'):
-        engine = NBAMarketIntentEngine()
+if st.button('🚀 執行盤口獵殺分析 (V7.1)'):
+    with st.spinner('正在分析莊家佈局與誘盤信號...'):
+        engine = NBAMarketHunter()
         df = engine.run()
         
         if not df.empty:
-            # 呈現表格
-            st.dataframe(df, use_container_width=True)
+            # 使用更直觀的顯示方式
+            st.markdown("### 🎯 莊家意圖解讀結果")
+            st.table(df)
             
-            # 專業解讀指引
             st.markdown("""
-            ### 🎓 V7.0 盤口解讀指引
-            - **市場信號強度**：代表莊家開盤與數據基準的「背離程度」。強度越高，代表莊家在該盤口隱藏了越多的風險調整。
-            - **關鍵停留點**：當盤口停在 3, 7 等數字時，代表莊家願意接受該數字帶來的平局/輸半風險，通常是極強的防守信號。
-            - **NO BET**：代表盤口完全反應了目前所有公開資訊（包括傷病與戰力），此時進場無任何邊際優勢。
+            ---
+            ### 📖 術語說明書
+            1. **🔥 熱盤誘大眾 (吸注)**：莊家開出一個對熱門球隊「太過友好」的盤口，引誘資金進場，此時建議**反向操作**。
+            2. **🛡️ 莊家防禦盤**：莊家不惜代價拉高門檻以減少損失，通常代表莊家極度看好該方向。
+            3. **🚫 過熱盤**：公眾對於得分過度樂觀，盤口被推高至不合理範圍，建議關注**小分**。
             """)
         else:
-            st.warning("⚠️ 目前暫無可用賽事盤口，或已達 API 抓取上限。")
+            st.warning("⚠️ 暫無數據，請確認 API 狀態。")
