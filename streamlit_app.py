@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 # ==========================================
 # 系統配置
 # ==========================================
-st.set_page_config(page_title="NBA Sharps Elite V8.0", layout="wide")
-st.title("🛡️ NBA Sharps Elite V8.0：市場意圖與職責分離版")
-st.caption("讓分盤：市場行為邏輯 | 大小分盤：進階效率邏輯 | 禁止邏輯交叉污染")
+st.set_page_config(page_title="NBA Sharps Elite V8.2", layout="wide")
+st.title("🛡️ NBA Sharps Elite V8.2：陷阱偵測與意圖獵殺")
+st.caption("職責分離：讓分盤(市場心理) | 大小分(數據戰力) | 新增盤口合理性濾網")
 
 try:
     API_KEY = st.secrets["THE_ODDS_API_KEY"]
@@ -19,7 +19,7 @@ except:
     st.error("請在 Secrets 中設定 THE_ODDS_API_KEY")
     st.stop()
 
-class NBASharpsEliteV8:
+class NBAMarketSniperV82:
     def __init__(self):
         self.team_map = {
             'Atlanta Hawks': '老鷹', 'Boston Celtics': '塞爾提克', 'Brooklyn Nets': '籃網',
@@ -36,66 +36,32 @@ class NBASharpsEliteV8:
         }
 
     def get_data(self):
-        # 僅用於大小分判斷的效率值
         stats = leaguedashteamstats.LeagueDashTeamStats(measure_type_detailed_defense='Advanced', last_n_games=10).get_data_frames()[0]
-        # 獲取即時盤口與移動數據 (模擬初盤比對)
         market_url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/?apiKey={API_KEY}&regions=us&markets=spreads,totals&oddsFormat=american"
         market_data = requests.get(market_url).json()
         return stats, market_data
 
-    def analyze_spread_intent(self, game_data, stats_df):
-        """職責 1: 讓分盤市場行為分析 (不使用預測比分)"""
-        outcomes = game_data['bookmakers'][0]['markets'][0]['outcomes']
-        h_en = game_data['home_team']
-        a_en = game_data['away_team']
-        
-        # 模擬盤口變化 (此處透過 NetRating 建立基準初盤，用以觀察市場移動方向)
-        h_row = stats_df[stats_df['TEAM_NAME'] == h_en].iloc[0]
-        a_row = stats_df[stats_df['TEAM_NAME'] == a_en].iloc[0]
-        implied_opening = -(h_row['E_NET_RATING'] - a_row['E_NET_RATING'] + 2.5)
-        
-        current_s = next(o['point'] for o in outcomes if o['name'] == h_en)
-        
-        # STEP 1-3: 判斷移動與 RLM (Reverse Line Movement)
-        move_dist = current_s - implied_opening
-        signal_strength = 0
-        direction = "❌ NO BET"
-        intent_tag = "市場平衡"
-
-        # 邏輯：如果盤口往強隊移動且水位變低，代表莊家防禦
-        # 邏輯：如果盤口往強隊移動但水位反升，代表誘盤
-        if abs(move_dist) > 1.5:
-            signal_strength = min(int(abs(move_dist) * 25), 95)
-            if move_dist < 0: # 莊家加深主隊讓分
-                direction = f"{self.team_map.get(h_en)} 較容易過盤"
-                intent_tag = "🛡️ 莊家風險防禦 (強隊方向)"
-            else: # 莊家加深客隊讓分 (或主隊減輕)
-                direction = f"{self.team_map.get(a_en)} 較容易過盤"
-                intent_tag = "📉 資金流向引導 (受讓方向)"
-        
-        # 關鍵數字補償 (3, 7, 10)
-        if current_s in [-3, -7, -10, 3, 7, 10]:
-            signal_strength += 10
-            intent_tag += " | 關鍵數字停留"
-
-        return direction, signal_strength, intent_tag, current_s
-
-    def analyze_total_efficiency(self, game_data, stats_df):
-        """職責 2: 大小分效率分析 (純數據導向)"""
-        h_en = game_data['home_team']
-        a_en = game_data['away_team']
+    def analyze_market_logic(self, h_en, a_en, current_s, stats_df):
+        """核心：判讀盤口合理性與莊家陷阱"""
         h_row = stats_df[stats_df['TEAM_NAME'] == h_en].iloc[0]
         a_row = stats_df[stats_df['TEAM_NAME'] == a_en].iloc[0]
         
-        mkt_t = game_data['bookmakers'][0]['markets'][1]['outcomes'][0]['point']
+        # 理論戰力盤 (Fair Line)
+        fair_s = -(h_row['E_NET_RATING'] - a_row['E_NET_RATING'] + 2.8)
         
-        pace = (h_row['E_PACE'] + a_row['E_PACE']) / 2
-        fair_t = (h_row['E_OFF_RATING'] + a_row['E_OFF_RATING']) * (pace/100)
+        # 1. 偵測『太甜』的盤口 (吸注陷阱)
+        # 如果數據看好 A 贏 8 分，莊家只開 3 分 -> 誘買 A
+        diff = current_s - fair_s
+        trap_status = "✅ 盤口邏輯正常"
+        if diff > 4.5:
+            trap_status = "⚠️ 誘盤警告：強隊太便宜 (吸注)"
+        elif diff < -4.5:
+            trap_status = "🛡️ 莊家防禦：強隊門檻極高"
+
+        # 2. 關鍵數字停留分析
+        is_key_num = "是" if current_s in [-3, -7, -10, 3, 7, 10] else "否"
         
-        edge = fair_t - mkt_t
-        if edge > 6.0: return "Over (大分)", "火熱進攻預期"
-        if edge < -6.0: return "Under (小分)", "防守節奏壓制"
-        return "❌ NO BET", "數據與盤口契合"
+        return trap_status, round(fair_s, 1), is_key_num
 
     def run(self):
         stats_df, markets = self.get_data()
@@ -104,25 +70,47 @@ class NBASharpsEliteV8:
 
         for game in markets:
             try:
-                # 讓分盤判斷
-                s_dir, s_strength, s_intent, curr_s = self.analyze_spread_intent(game, stats_df)
+                h_en, a_en = game['home_team'], game['away_team']
+                h_cn, a_cn = self.team_map.get(h_en, h_en), self.team_map.get(a_en, a_en)
                 
-                # 大小分判斷
-                t_dir, t_reason = self.analyze_total_efficiency(game, stats_df)
+                # 讓分盤數據
+                outcomes = game['bookmakers'][0]['markets'][0]['outcomes']
+                current_s = next(o['point'] for o in outcomes if o['name'] == h_en)
                 
-                # 下注比例 (由信號強度轉化)
-                bet_ratio = f"{int(s_strength * 0.1)}%" if s_strength > 0 else "0%"
+                # 市場邏輯與陷阱分析
+                trap_info, fair_s, is_key = self.analyze_market_logic(h_en, a_en, current_s, stats_df)
+                
+                # 決定推薦方向 (結合意圖)
+                rec_direction = "❌ NO BET"
+                signal_strength = 0
+                
+                if "誘盤" in trap_info:
+                    rec_direction = f"{self.team_map.get(a_en)} 受讓"
+                    signal_strength = 85
+                elif "防禦" in trap_info:
+                    rec_direction = f"{self.team_map.get(h_en)} 讓分"
+                    signal_strength = 75
+                elif is_key == "是":
+                    rec_direction = "跟隨關鍵數字移動"
+                    signal_strength = 50
+
+                # 大小分分析 (職責分離)
+                mkt_t = game['bookmakers'][0]['markets'][1]['outcomes'][0]['point']
+                pace = (h_row['E_PACE'] + a_row['E_PACE']) / 2 if 'h_row' in locals() else 100
+                # (簡化計算示意)
+                fair_t = (stats_df[stats_df['TEAM_NAME']==h_en]['E_OFF_RATING'].values[0] + stats_df[stats_df['TEAM_NAME']==a_en]['E_OFF_RATING'].values[0])
+                t_rec = "Over" if fair_t > mkt_t + 5 else ("Under" if fair_t < mkt_t - 5 else "NO BET")
 
                 report.append({
-                    "對戰 (客@主)": f"{self.team_map.get(game['away_team'])} @ {self.team_map.get(game['home_team'])}",
-                    "【讓分盤】過盤判斷": s_dir,
-                    "市場信號強度": f"{s_strength}%",
-                    "莊家行為偵測": s_intent,
-                    "【大小分】建議": t_dir,
-                    "大小分依據": t_reason,
-                    "目前盤口 (S/T)": f"{curr_s} / {game['bookmakers'][0]['markets'][1]['outcomes'][0]['point']}",
-                    "推薦下注比例": bet_ratio,
-                    "sort": s_strength
+                    "市場信號強度": f"{signal_strength}%",
+                    "對戰 (客@主)": f"{a_cn} @ {h_cn}",
+                    "讓分推薦方向": rec_direction,
+                    "莊家意圖/陷阱": trap_info,
+                    "數據基準盤": fair_s,
+                    "目前盤口": current_s,
+                    "大小分建議": t_rec,
+                    "關鍵數字": is_key,
+                    "sort": signal_strength
                 })
             except: continue
         
@@ -131,14 +119,20 @@ class NBASharpsEliteV8:
 # ==========================================
 # UI 渲染
 # ==========================================
-if st.button('🎯 啟動 V8.0 市場行為深度掃描'):
-    with st.spinner('解構莊家意圖中...'):
-        engine = NBASharpsEliteV8()
+if st.button('🚀 啟動 V8.2 意圖與陷阱深度掃描'):
+    with st.spinner('偵測莊家佈局與資金陷阱中...'):
+        engine = NBAMarketSniperV82()
         df = engine.run()
         if not df.empty:
-            st.markdown("### 🏹 市場行為分析報告")
+            st.markdown("### 🏹 莊家行為解讀與獵殺報告")
             st.table(df.drop(columns=["sort"]))
             
-            st.info("💡 V8.0 注意事項：讓分盤已停止參考預測分差，完全基於莊家開盤行為與市場移動邏輯。")
+            st.markdown("""
+            ---
+            ### 🎓 如何利用 V8.2 提高勝率？
+            1. **獵殺『誘盤』**：當莊家開出一個比數據基準「便宜很多」的盤口時，通常代表莊家在引誘大眾買強隊。此時**反向買受讓**的勝率極高。
+            2. **跟隨『防禦』**：若盤口開得比數據還深，代表莊家寧可少賠也不想讓你贏，這通常是強隊會大勝的信號。
+            3. **避開平衡盤**：當數據基準與盤口完全一致時，代表無利可圖，請果斷執行 **NO BET**。
+            """)
         else:
-            st.warning("⚠️ 暫無市場數據。")
+            st.warning("⚠️ 數據抓取失敗，請確認 API 狀態。")
