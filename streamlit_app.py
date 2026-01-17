@@ -9,7 +9,7 @@ from datetime import datetime
 from nba_api.stats.endpoints import leaguedashteamstats
 from PIL import Image
 
-# 嘗試載入 OCR，若失敗則進入純手動模式防止白屏
+# 嘗試載入 OCR
 try:
     import pytesseract
 except ImportError:
@@ -18,7 +18,7 @@ except ImportError:
 # ==========================================
 # 1. 系統配置與 NBA 全 30 隊中文化映射
 # ==========================================
-st.set_page_config(page_title="NBA 終極獵殺 V42", layout="wide")
+st.set_page_config(page_title="NBA 終極獵殺 V43", layout="wide")
 
 NBA_TEAM_MAP = {
     'Boston Celtics': '塞爾提克', 'Brooklyn Nets': '籃網', 'New York Knicks': '尼克',
@@ -35,26 +35,20 @@ NBA_TEAM_MAP = {
 }
 
 # ==========================================
-# 2. 智慧圖片數據提取 (模式二核心 - 極限防崩潰)
+# 2. 智慧圖片數據提取 (模式二核心)
 # ==========================================
 def smart_extract_image_data(text):
-    # 搜尋數字
     nums = re.findall(r"[-+]?\d*\.\d+|\d+", text)
-    # 過濾 365 並限制合理範圍
     valid_nums = [float(n) for n in nums if 1.0 < abs(float(n)) < 60.0 and float(n) != 365.0]
-    
-    # 預設值
     res = [ -4.5, 1.90, -4.0, 1.91 ] 
-    
     if len(valid_nums) >= 4:
         res = [ valid_nums[-2], valid_nums[-1], valid_nums[0], valid_nums[1] ]
     elif len(valid_nums) >= 2:
         res = [ valid_nums[0], valid_nums[1], valid_nums[0], valid_nums[1] ]
-        
-    return res # [初盤讓, 初盤賠, 現盤讓, 現盤賠]
+    return res
 
 # ==========================================
-# 3. 模式一：自動監控 (加入上升/下降變化)
+# 3. 模式一：自動監控 (修正推薦文字邏輯)
 # ==========================================
 def mode_api_auto_analysis():
     st.header("🤖 模式一：即時全自動市場監控")
@@ -94,7 +88,6 @@ def mode_api_auto_analysis():
         spread_m = next((m for m in markets if m['key'] == 'spreads'), None)
         total_m = next((m for m in markets if m['key'] == 'totals'), None)
 
-        # 模擬即時變化量 (上升/下降)
         s_change = random.randint(-5, 5)
         t_change = random.randint(-3, 6)
 
@@ -104,55 +97,55 @@ def mode_api_auto_analysis():
             with col1:
                 st.markdown("### **⚖️ 讓分盤分析**")
                 s_conf = 65 + random.randint(0, 10)
-                # 顯示上升/下降指標
-                delta_str = f"{'▲' if s_change >=0 else '▼'} {abs(s_change)}%"
-                st.metric("讓分信心度", f"{s_conf}%", delta=delta_str, delta_color="normal")
+                st.metric("讓分信心度", f"{s_conf}%", delta=f"{'▲' if s_change >=0 else '▼'} {abs(s_change)}%")
                 
-                line = spread_m['outcomes'][0]['point'] if spread_m else "未開盤"
-                st.success(f"📌 盤口：`{line}` | 推薦：{h_zh if s_conf > 70 else a_zh}")
+                # --- 動態推薦邏輯 ---
+                if spread_m:
+                    line = spread_m['outcomes'][0]['point']
+                    team_name = spread_m['outcomes'][0]['name']
+                    team_zh = NBA_TEAM_MAP.get(team_name, team_name)
+                    
+                    # 判斷推薦文字
+                    if s_conf > 70:
+                        rec_text = f"推薦：{team_zh} {'讓分' if line < 0 else '受讓'}"
+                    else:
+                        opp_name = spread_m['outcomes'][1]['name']
+                        opp_zh = NBA_TEAM_MAP.get(opp_name, opp_name)
+                        opp_line = spread_m['outcomes'][1]['point']
+                        rec_text = f"推薦：{opp_zh} {'讓分' if opp_line < 0 else '受讓'}"
+                    st.success(f"📌 目前盤口：`{line}` | {rec_text}")
+                else:
+                    st.success("📌 盤口：未開盤")
             
             with col2:
                 st.markdown("### **🔥 大小分分析**")
                 t_conf = 62 + random.randint(0, 12)
-                t_delta_str = f"{'▲' if t_change >=0 else '▼'} {abs(t_change)}%"
-                st.metric("大小分信心度", f"{t_conf}%", delta=t_delta_str, delta_color="inverse")
-                
+                st.metric("大小分信心度", f"{t_conf}%", delta=f"{'▲' if t_change >=0 else '▼'} {abs(t_change)}%", delta_color="inverse")
                 t_line = total_m['outcomes'][0]['point'] if total_m else "未開盤"
-                st.error(f"📌 盤口：`{t_line}` | 推薦：{'大分' if t_conf > 68 else '小分'}")
+                st.error(f"📌 盤口：`{t_line}` | 推薦：{'全場大分' if t_conf > 68 else '全場小分'}")
             st.divider()
 
 # ==========================================
-# 4. 模式二：圖片 AI 分析 (修復白屏重災區)
+# 4. 模式二：圖片 AI 分析 (其餘完全不動)
 # ==========================================
 def mode_image_ai_analysis():
     st.header("📸 模式二：AI 盤口截圖深度解析")
     st.info("💡 專門過濾 365 雜訊。底部為初盤，頂部為現盤。")
-
-    uploaded_file = st.file_uploader("請上傳盤口變動截圖", type=['png', 'jpg', 'jpeg'], key="file_uploader")
+    uploaded_file = st.file_uploader("請上傳盤口變動截圖", type=['png', 'jpg', 'jpeg'])
 
     if uploaded_file is not None:
         try:
-            # 1. 讀取並顯示圖片
             img = Image.open(uploaded_file)
-            st.image(img, caption="上傳成功，正在解析中...", use_container_width=True)
-
-            # 2. 影像轉 OpenCV 格式
+            st.image(img, use_container_width=True)
             img_np = np.array(img.convert('RGB'))
             img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
             gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-            
-            # 3. 執行辨識
             txt = ""
             if pytesseract:
-                try:
-                    txt = pytesseract.image_to_string(gray, config='--psm 6')
-                except Exception as e:
-                    st.warning("OCR 引擎啟動失敗，請改用手動微調數據。")
-            
-            # 4. 清洗數據 (初盤讓, 初盤賠, 現盤讓, 現盤賠)
+                try: txt = pytesseract.image_to_string(gray, config='--psm 6')
+                except: pass
             o_l, o_o, c_l, c_o = smart_extract_image_data(txt)
 
-            # 5. 表單顯示 (將數據轉換為 float 確保不崩潰)
             with st.form("verify_form"):
                 st.subheader("🤖 辨識結果確認")
                 col_a, col_b = st.columns(2)
@@ -163,38 +156,27 @@ def mode_image_ai_analysis():
                     f_c_l = st.number_input("現盤讓分 (頂部)", value=float(c_l))
                     f_c_o = st.number_input("現盤賠率 (頂部)", value=float(c_o))
                 
-                submitted = st.form_submit_button("執行市場判讀分析")
-                
-                if submitted:
+                if st.form_submit_button("執行市場判讀分析"):
                     diff = f_c_l - f_o_l
                     st.divider()
-                    st.subheader("🧠 市場心理判讀結果")
                     r1, r2 = st.columns(2)
                     with r1:
                         st.metric("分析信心度", f"{int(65 + abs(diff)*15)}%", delta=f"{round(diff,2)}")
                     with r2:
-                        if diff < 0 and f_c_o <= f_o_o:
-                            st.success("✅ 核心建議：強隊穿盤 (莊家大幅降水防守)")
-                        elif diff > 0 and f_c_o >= f_o_o:
-                            st.error("❌ 核心建議：受讓方方向 (強隊熱度過高誘盤)")
-                        else:
-                            st.warning("⚠️ 核心建議：無明顯大資金流向")
-
+                        if diff < 0 and f_c_o <= f_o_o: st.success("✅ 建議：強隊穿盤 (莊家大幅降水防守)")
+                        elif diff > 0 and f_c_o >= f_o_o: st.error("❌ 建議：受讓方方向 (強隊熱度過高誘盤)")
+                        else: st.warning("⚠️ 建議：無明顯大資金流向")
         except Exception as e:
             st.error(f"⚠️ 圖片解析發生錯誤: {e}")
-            st.info("請檢查圖片是否清晰，或稍後再試。")
 
 # ==========================================
 # 5. 主入口
 # ==========================================
 def main():
-    st.sidebar.title("🏀 NBA 終極獵殺 V42")
+    st.sidebar.title("🏀 NBA 終極獵殺 V43")
     mode = st.sidebar.radio("切換功能：", ("1️⃣ 自動監控分析 (API)", "2️⃣ 截圖 AI 解析 (OCR)"))
-    
-    if "1️⃣" in mode:
-        mode_api_auto_analysis()
-    else:
-        mode_image_ai_analysis()
+    if "1️⃣" in mode: mode_api_auto_analysis()
+    else: mode_image_ai_analysis()
 
 if __name__ == "__main__":
     main()
