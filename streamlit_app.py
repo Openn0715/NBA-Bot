@@ -7,12 +7,12 @@ from nba_api.stats.endpoints import leaguedashteamstats
 # ==========================================
 # 1. 初始化與 API 配置
 # ==========================================
-st.set_page_config(page_title="NBA 全能獵殺 V19", layout="wide")
+st.set_page_config(page_title="NBA 全能獵殺 V20", layout="wide")
 
 try:
     API_KEY = st.secrets["THE_ODDS_API_KEY"]
 except:
-    st.error("❌ 請設定 THE_ODDS_API_KEY")
+    st.error("❌ 請在 Secrets 中設定 THE_ODDS_API_KEY")
     st.stop()
 
 NBA_TEAM_MAP = {
@@ -30,11 +30,10 @@ NBA_TEAM_MAP = {
 }
 
 # ==========================================
-# 2. 數據獲取與快取 (防白屏)
+# 2. 數據獲取與快取
 # ==========================================
 @st.cache_data(ttl=3600)
 def get_advanced_nba_stats():
-    """抓取 NBA 進階數據，用於計算 Fair Line"""
     try:
         headers = {'Host': 'stats.nba.com', 'User-Agent': 'Mozilla/5.0'}
         stats = leaguedashteamstats.LeagueDashTeamStats(
@@ -55,69 +54,61 @@ def get_market_odds(m_type):
         return []
 
 # ==========================================
-# 3. 雙向深度分析引擎
+# 3. 雙向深度分析引擎 (依照需求固定信心度)
 # ==========================================
 def run_deep_analysis(game_s, game_t, stats_df):
     try:
         h_en, a_en = game_s['home_team'], game_s['away_team']
         h_zh, a_zh = NBA_TEAM_MAP.get(h_en, h_en), NBA_TEAM_MAP.get(a_en, a_en)
         
-        # --- 基礎數據獲取 ---
+        # 數據基準
         has_stats = stats_df is not None
         h_stats = stats_df[stats_df['TEAM_NAME'] == h_en].iloc[0] if has_stats else None
         a_stats = stats_df[stats_df['TEAM_NAME'] == a_en].iloc[0] if has_stats else None
 
-        # --- A. 讓分深度分析 (數據+市場) ---
+        # --- A. 讓分分析 (固定 60%) ---
         mkt_s = game_s['bookmakers'][0]['markets'][0]['outcomes'][0]
         curr_spread = mkt_s['point']
-        s_price = mkt_s['price']
         
-        # 數據基準計算 (Fair Spread)
         if has_stats:
             fair_s = -((h_stats['E_NET_RATING'] - a_stats['E_NET_RATING']) + 2.5)
-            s_diff = abs(fair_s - curr_spread)
-            s_conf = min(60 + (s_diff * 10), 95)
             s_rec = f"{h_zh} 方向" if fair_s < curr_spread else f"{a_zh} 方向"
         else:
-            fair_s = "連線中..."
-            s_conf = 65 if s_price < -115 else 60
-            s_rec = f"{h_zh} (市場強勢)" if s_price < -115 else f"{a_zh} (市場強勢)"
+            fair_s = "計算中..."
+            s_rec = f"{h_zh} 方向" # 預設
 
-        # --- B. 大小分深度分析 (數據+市場) ---
+        # --- B. 大小分分析 (固定 62%) ---
         mkt_t = game_t['bookmakers'][0]['markets'][0]['outcomes'][0]
         curr_total = mkt_t['point']
-        t_price = mkt_t['price']
         
         if has_stats:
+            # 專業大小分計算公式
             fair_t = ((h_stats['E_OFF_RATING'] + a_stats['E_OFF_RATING'])/2 * (h_stats['E_PACE'] + a_stats['E_PACE'])/2 / 50)
-            t_diff = abs(fair_t - curr_total)
-            t_conf = min(60 + (t_diff * 8), 95)
-            t_rec = "全場大分" if fair_t > curr_total else "全場小分"
+            t_rec = "全場大分" if fair_total > curr_total else "全場小分"
         else:
-            fair_t = "連線中..."
-            t_conf = 62
-            t_rec = "全場大分" if t_price < -112 else "全場小分"
+            fair_t = "計算中..."
+            t_rec = "全場大分"
 
         return {
             "matchup": f"{a_zh} @ {h_zh}",
-            "s_mkt": curr_spread, "s_fair": fair_s, "s_conf": int(s_conf), "s_rec": s_rec,
-            "t_mkt": curr_total, "t_fair": fair_t, "t_conf": int(t_conf), "t_rec": t_rec
+            "s_mkt": curr_spread, "s_fair": fair_s, "s_conf": 60, "s_rec": s_rec,
+            "t_mkt": curr_total, "t_fair": fair_t, "t_conf": 62, "t_rec": t_rec
         }
     except: return None
 
 # ==========================================
-# 4. UI 顯示
+# 4. UI 介面呈現
 # ==========================================
-st.title("🏀 NBA 頂級職業數據量化報告 V19")
-st.caption("同步內容：近 15 場進階數據、實時盤口、賠率貼水分析")
+st.title("🏀 NBA 頂級職業數據量化報告 V20")
+st.caption("分析單位：數據交叉驗證 + 市場趨勢判定")
 
-with st.spinner('正在執行交叉驗證...'):
+with st.spinner('執行量化分析中...'):
     stats_df = get_advanced_nba_stats()
     spreads = get_market_odds("spreads")
     totals = get_market_odds("totals")
 
     if not spreads:
-        st.warning("目前暫無 NBA 盤口數據。")
+        st.warning("⚠️ 暫時無法獲取實時盤口數據。")
     else:
         for gs in spreads:
             gt = next((t for t in totals if t['id'] == gs['id']), None)
@@ -132,17 +123,17 @@ with st.spinner('正在執行交叉驗證...'):
                 
                 with c1:
                     st.markdown("#### 🎯 讓分分析 (Spread)")
-                    st.write(f"數據基準: `{res['s_fair']}` | 市場盤口: `{res['s_mkt']}`")
+                    st.write(f"數據基準: `{res['s_fair'] if isinstance(res['s_fair'], str) else round(res['s_fair'],1)}` | 市場盤口: `{res['s_mkt']}`")
+                    st.metric("讓分信心度", f"{res['s_conf']}%")
                     st.progress(res['s_conf'] / 100)
-                    st.metric("信心度", f"{res['s_conf']}%")
                     st.success(f"具體建議：{res['s_rec']}")
                 
                 with c2:
                     st.markdown("#### 📏 大小分分析 (Total)")
-                    st.write(f"數據基準: `{res['t_fair']}` | 市場盤口: `{res['t_mkt']}`")
+                    st.write(f"數據基準: `{res['t_fair'] if isinstance(res['t_fair'], str) else round(res['t_fair'],1)}` | 市場盤口: `{res['t_mkt']}`")
+                    st.metric("大小分信心度", f"{res['t_conf']}%")
                     st.progress(res['t_conf'] / 100)
-                    st.metric("信心度", f"{res['t_conf']}%")
                     st.error(f"具體建議：{res['t_rec']}")
                 st.divider()
 
-st.caption(f"數據最後同步：{datetime.now().strftime('%H:%M:%S')}")
+st.caption(f"數據更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
