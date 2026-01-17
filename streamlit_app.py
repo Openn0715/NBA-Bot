@@ -1,143 +1,133 @@
 import streamlit as st
 import pandas as pd
-import requests
-import numpy as np
-from scipy.stats import norm
 from datetime import datetime
 
 # ==========================================
-# 1. 系統環境與 UI 配置
+# 1. UI 與 Session 初始化
 # ==========================================
-st.set_page_config(page_title="籃球市場分析系統 V11", layout="wide")
+st.set_page_config(page_title="籃球逐場獵殺 V12", layout="wide")
 
-# 初始化 Session State (確保首頁優先級)
-if 'current_league' not in st.session_state:
-    st.session_state.current_league = None
+if 'league' not in st.session_state:
+    st.session_state.league = None
 
-def select_league(league_key):
-    st.session_state.current_league = league_key
+def set_league(l): st.session_state.league = l
 
 # ==========================================
-# 2. League Config (聯盟配置模組)
+# 2. 聯盟模組與數據路由
 # ==========================================
-LEAGUE_CONFIG = {
-    "NBA": {"name": "美國職籃 (NBA)", "has_adv_stats": True, "api_key": "basketball_nba"},
-    "KBL": {"name": "韓國籃球 (KBL)", "has_adv_stats": False, "api_key": "basketball_kbl"},
-    "CBA": {"name": "中國籃球 (CBA)", "has_adv_stats": False, "api_key": "basketball_cba"},
-    "B_LEAGUE": {"name": "日本籃球 (B.League)", "has_adv_stats": False, "api_key": "basketball_bleague"}
+LEAGUES = {
+    "NBA": "美國職籃", "KBL": "韓國籃球", 
+    "CBA": "中國籃球", "B_LEAGUE": "日本籃球"
 }
 
 # ==========================================
-# 3. 分析引擎模組 (職責分離)
+# 3. 核心逐場分析引擎
 # ==========================================
-class BasketballAnalysisRouter:
-    def __init__(self, league_key):
-        self.league = league_key
-        self.config = LEAGUE_CONFIG[league_key]
-        self.api_key = st.secrets.get("THE_ODDS_API_KEY", "")
+class GameAnalyser:
+    def __init__(self, league):
+        self.league = league
 
-    def fetch_data(self):
-        # 實務上在此依據 self.config['api_key'] 請求不同的資料源
-        # 以下為模擬數據結構
-        return [
-            {
-                "home": "主隊", "away": "客隊", 
-                "line_open": -5.5, "line_curr": -4.0, 
-                "odds_curr": -110, "total": 215.5,
-                "public_volume": "65% on Home"
-            }
-        ]
-
-    # --- 邏輯 A: 純市場分析 (所有聯盟適用) ---
-    def pure_market_analysis(self, game):
-        move = game['line_curr'] - game['line_open']
-        is_rlm = ("Home" in game['public_volume'] and move > 0) or ("Away" in game['public_volume'] and move < 0)
+    def analyze_single_game(self, g):
+        """
+        對單一比賽進行個別分析邏輯
+        """
+        # A. 盤口移動計算
+        move = g['curr_spread'] - g['open_spread']
         
-        strength = 50
-        intent = "市場波動平穩"
+        # B. RLM (反向移動) 判定邏輯
+        # 邏輯：資金在主隊 (bias=H) 但盤口往客隊動 (move > 0)
+        is_rlm = (g['public_bias'] == 'H' and move > 0) or (g['public_bias'] == 'A' and move < 0)
+        
+        # C. 誘盤判斷 (Bait Line)
+        # 邏輯：強隊實力遠高於盤口，且無人缺陣
+        is_trap = abs(g['open_spread']) < 4.0 and g['is_power_team']
+        
+        # D. 決定推薦方向
         rec = "❌ NO BET"
-        
+        confidence = 50
+        reason = "市場行為不明確，莊家與資金方向同步。"
+
         if is_rlm:
-            strength = 85
-            rec = f"{game['away'] if move > 0 else game['home']} (RLM 方向)"
-            intent = "⚠️ 偵測到反向移動 (RLM)：大眾買入但盤口反向，莊家顯然在防範專業資金。"
-        elif abs(move) >= 1.5:
-            strength = 70
-            rec = f"{game['home'] if move < 0 else game['away']} (趨勢跟隨)"
-            intent = "🛡️ 莊家單向防禦：盤口移動幅度劇烈，莊家正在降低賠付風險。"
-        
-        return strength, intent, rec
+            rec = f"【推薦】{g['home'] if move < 0 else g['away']} (反向盤)"
+            confidence = 88
+            reason = "偵測到強烈 RLM 信號：市場大眾資金湧入，莊家卻反向調盤，信心度高。"
+        elif is_trap:
+            rec = f"【推薦】{g['away'] if g['open_spread'] < 0 else g['home']} (受讓)"
+            confidence = 75
+            reason = "警示：盤口過於友善（太甜），疑似吸注盤，建議反向操作。"
+        elif abs(move) >= 2.0:
+            rec = f"【推薦】{g['home'] if move < 0 else g['away']}"
+            confidence = 65
+            reason = "莊家防禦性大幅調盤，跟隨專業資金流向。"
 
-    # --- 邏輯 B: NBA 專屬數據驗證 (僅 NBA 呼叫) ---
-    def validate_with_nba_stats(self, game):
-        # 此處會載入 nba_api 數據 (OffRtg, DefRtg, 傷病)
-        # 僅用於微調信心度，不決定方向
-        stats_check = "✅ 已完成傷病與效率值校驗。目前盤口變化與主力缺陣情況吻合。"
-        confidence_boost = 5 # 數據支持則提升信心
-        return confidence_boost, stats_check
+        return {
+            "rec": rec,
+            "conf": confidence,
+            "intent": "發現專業資金介入" if is_rlm else ("莊家設陷誘騙" if is_trap else "正常波動"),
+            "reason": reason,
+            "is_key_num": abs(g['curr_spread']) in [3.0, 7.0, 10.0]
+        }
 
 # ==========================================
-# 4. League Selector (首頁介面)
+# 4. 聯盟選擇入口
 # ==========================================
-if st.session_state.current_league is None:
-    st.title("🏹 籃球市場盤口分析系統")
-    st.subheader("請先選擇要分析的聯盟：")
-    
+if st.session_state.league is None:
+    st.title("🏹 籃球市場逐場分析系統")
+    st.subheader("請選擇今日分析聯盟：")
     cols = st.columns(4)
-    btn_keys = list(LEAGUE_CONFIG.keys())
-    
-    for i, key in enumerate(btn_keys):
+    for i, (k, v) in enumerate(LEAGUES.items()):
         with cols[i]:
-            if st.button(f"進入 {LEAGUE_CONFIG[key]['name']}", use_container_width=True):
-                select_league(key)
-                st.rerun()
-    
-    st.info("💡 系統說明：NBA 模式將包含額外的效率值與傷病校驗；其餘聯盟僅針對市場行為分析。")
+            st.button(f"進入 {v}", on_click=set_league, args=(k,), use_container_width=True)
     st.stop()
 
 # ==========================================
-# 5. 分析主流程 (Analysis Router)
+# 5. 逐場掃描流程 (主程序)
 # ==========================================
-target_league = st.session_state.current_league
-config = LEAGUE_CONFIG[target_league]
-
-# Sidebar 控制項
-st.sidebar.title(f"🏀 {config['name']}")
-if st.sidebar.button("⬅️ 返回聯盟選擇"):
-    st.session_state.current_league = None
+st.sidebar.title(f"🏀 {LEAGUES[st.session_state.league]}")
+if st.sidebar.button("返回選擇"):
+    st.session_state.league = None
     st.rerun()
 
-st.header(f"🎯 {config['name']} 當日市場深度解析")
-st.write(f"當前模式：{'市場行為 + 數據驗證 (NBA)' if config['has_adv_stats'] else '純市場盤口行為分析 (International)'}")
+analysis_date = st.sidebar.date_input("分析日期", datetime.now())
 
-router = BasketballAnalysisRouter(target_league)
-games = router.fetch_data()
+# 模擬當日比賽列表 (實際上會從 API 獲取)
+# 這裡展示了 loop 的運作方式
+mock_games = [
+    {"home": "勇士", "away": "湖人", "open_spread": -4.5, "curr_spread": -3.0, "public_bias": "H", "is_power_team": True},
+    {"home": "塞爾提克", "away": "尼克", "open_spread": -8.0, "curr_spread": -9.5, "public_bias": "H", "is_power_team": True},
+    {"home": "老鷹", "away": "公牛", "open_spread": -2.5, "curr_spread": -2.5, "public_bias": "A", "is_power_team": False},
+]
 
-# 渲染分析結果
-for g in games:
-    # 執行基礎市場分析
-    mkt_strength, mkt_intent, mkt_rec = router.pure_market_analysis(g)
+st.header(f"🎯 {LEAGUES[st.session_state.league]} 逐場市場獵殺報告")
+
+analyser = GameAnalyser(st.session_state.league)
+
+# 重點：逐場進行 Loop
+for game in mock_games:
+    res = analyser.analyze_single_game(game)
     
-    # 執行 NBA 專屬校驗
-    final_confidence = mkt_strength
-    nba_stats_report = ""
-    
-    if config['has_adv_stats']:
-        boost, stats_log = router.validate_with_nba_stats(g)
-        final_confidence += boost
-        nba_stats_report = stats_log
-
-    # 輸出卡片
+    # UI 顯示：Card 形式
     with st.container():
-        col_l, col_r = st.columns([1, 2])
-        with col_l:
-            st.metric("信號強度", f"{final_confidence}%")
-            st.subheader(f"✅ 推薦：{mkt_rec}")
-        with col_r:
-            st.markdown(f"**📌 盤口狀態：** 初盤 {g['line_open']} → 現盤 {g['line_curr']}")
-            st.markdown(f"**🧠 市場判讀：** {mkt_intent}")
-            if nba_stats_report:
-                st.markdown(f"**🔬 NBA 數據校驗：** {nba_stats_report}")
+        # 分隔線與標題
+        st.markdown(f"### 🏟️ {game['away']} (客) vs {game['home']} (主)")
+        
+        c1, c2, c3 = st.columns([1, 1, 2])
+        
+        with c1:
+            st.write("**盤口變動**")
+            st.latex(f"{game['open_spread']} \\rightarrow {game['curr_spread']}")
+            if res['is_key_num']:
+                st.warning("⚠️ 停在關鍵分差數字")
+                
+        with c2:
+            st.metric("信心程度", f"{res['conf']}%")
+            st.write(f"**意圖：** {res['intent']}")
+            
+        with c3:
+            st.subheader(res['rec'])
+            st.info(f"分析理由：{res['reason']}")
+            
         st.divider()
 
-st.caption(f"數據更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# 頁尾說明
+st.caption("提示：信心度 80% 以上且為『反向盤』的場次，過盤概率最具統計學意義。")
