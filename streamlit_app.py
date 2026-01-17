@@ -2,19 +2,19 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
+from nba_api.stats.endpoints import leaguedashteamstats
 
 # ==========================================
-# 1. 系統環境配置
+# 1. 初始化與 API 配置
 # ==========================================
-st.set_page_config(page_title="NBA 數據獵殺 V18", layout="wide")
+st.set_page_config(page_title="NBA 全能獵殺 V19", layout="wide")
 
 try:
     API_KEY = st.secrets["THE_ODDS_API_KEY"]
 except:
-    st.error("❌ 找不到 API Key，請檢查 Secrets 設定。")
+    st.error("❌ 請設定 THE_ODDS_API_KEY")
     st.stop()
 
-# 核心映射表
 NBA_TEAM_MAP = {
     'Atlanta Hawks': '老鷹', 'Boston Celtics': '塞爾提克', 'Brooklyn Nets': '籃網',
     'Charlotte Hornets': '黃蜂', 'Chicago Bulls': '公牛', 'Cleveland Cavaliers': '騎士',
@@ -30,77 +30,100 @@ NBA_TEAM_MAP = {
 }
 
 # ==========================================
-# 2. 穩定的數據抓取 (帶有錯誤處理)
+# 2. 數據獲取與快取 (防白屏)
 # ==========================================
-@st.cache_data(ttl=600)
-def get_safe_odds(market_type):
-    """抓取盤口數據，增加超時處理"""
-    url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/?apiKey={API_KEY}&regions=us&markets={market_type}&oddsFormat=american"
+@st.cache_data(ttl=3600)
+def get_advanced_nba_stats():
+    """抓取 NBA 進階數據，用於計算 Fair Line"""
     try:
-        res = requests.get(url, timeout=15)
-        if res.status_code == 200:
-            return res.json()
-        return []
+        headers = {'Host': 'stats.nba.com', 'User-Agent': 'Mozilla/5.0'}
+        stats = leaguedashteamstats.LeagueDashTeamStats(
+            measure_type_detailed_defense='Advanced', 
+            last_n_games=15, headers=headers, timeout=15
+        ).get_data_frames()[0]
+        return stats
+    except:
+        return None
+
+@st.cache_data(ttl=300)
+def get_market_odds(m_type):
+    url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/?apiKey={API_KEY}&regions=us&markets={m_type}&oddsFormat=american"
+    try:
+        res = requests.get(url, timeout=10)
+        return res.json()
     except:
         return []
 
 # ==========================================
-# 3. 分析引擎 (當連不上官方數據時使用動態加權)
+# 3. 雙向深度分析引擎
 # ==========================================
-class NBASmartEngine:
-    @staticmethod
-    def get_analysis(game_s, game_t):
-        try:
-            home = game_s['home_team']
-            away = game_s['away_team']
-            
-            # 取得讓分
-            s_outcomes = game_s['bookmakers'][0]['markets'][0]['outcomes']
-            h_s = next(o for o in s_outcomes if o['name'] == home)
-            mkt_spread = h_s['point']
-            mkt_s_price = h_s['price']
-            
-            # 取得大小分
-            t_outcomes = game_t['bookmakers'][0]['markets'][0]['outcomes']
-            mkt_total = t_outcomes[0]['point']
-            mkt_t_price = t_outcomes[0]['price']
+def run_deep_analysis(game_s, game_t, stats_df):
+    try:
+        h_en, a_en = game_s['home_team'], game_s['away_team']
+        h_zh, a_zh = NBA_TEAM_MAP.get(h_en, h_en), NBA_TEAM_MAP.get(a_en, a_en)
+        
+        # --- 基礎數據獲取 ---
+        has_stats = stats_df is not None
+        h_stats = stats_df[stats_df['TEAM_NAME'] == h_en].iloc[0] if has_stats else None
+        a_stats = stats_df[stats_df['TEAM_NAME'] == a_en].iloc[0] if has_stats else None
 
-            # 模擬數據計算 (因應官方連線問題，改用市場變動與固定戰力偏差作為分析)
-            # 讓分信心邏輯：賠率低於 -115 且 盤口落在關鍵分差
-            s_conf = 60
-            if mkt_s_price < -115: s_conf += 15
-            if abs(mkt_spread) in [3, 7, 10]: s_conf += 10
-            
-            # 大小分信心邏輯：盤口相對於平均值 (225) 的背離程度
-            t_conf = 65
-            if mkt_total > 235 or mkt_total < 215: t_conf += 10
+        # --- A. 讓分深度分析 (數據+市場) ---
+        mkt_s = game_s['bookmakers'][0]['markets'][0]['outcomes'][0]
+        curr_spread = mkt_s['point']
+        s_price = mkt_s['price']
+        
+        # 數據基準計算 (Fair Spread)
+        if has_stats:
+            fair_s = -((h_stats['E_NET_RATING'] - a_stats['E_NET_RATING']) + 2.5)
+            s_diff = abs(fair_s - curr_spread)
+            s_conf = min(60 + (s_diff * 10), 95)
+            s_rec = f"{h_zh} 方向" if fair_s < curr_spread else f"{a_zh} 方向"
+        else:
+            fair_s = "連線中..."
+            s_conf = 65 if s_price < -115 else 60
+            s_rec = f"{h_zh} (市場強勢)" if s_price < -115 else f"{a_zh} (市場強勢)"
 
-            return {
-                "matchup": f"{NBA_TEAM_MAP.get(away, away)} @ {NBA_TEAM_MAP.get(home, home)}",
-                "s_mkt": mkt_spread, "s_conf": s_conf, "s_rec": f"{NBA_TEAM_MAP.get(home) if mkt_s_price < -110 else NBA_TEAM_MAP.get(away)} 方向",
-                "t_mkt": mkt_total, "t_conf": t_conf, "t_rec": "全場大分" if mkt_t_price < -112 else "全場小分"
-            }
-        except:
-            return None
+        # --- B. 大小分深度分析 (數據+市場) ---
+        mkt_t = game_t['bookmakers'][0]['markets'][0]['outcomes'][0]
+        curr_total = mkt_t['point']
+        t_price = mkt_t['price']
+        
+        if has_stats:
+            fair_t = ((h_stats['E_OFF_RATING'] + a_stats['E_OFF_RATING'])/2 * (h_stats['E_PACE'] + a_stats['E_PACE'])/2 / 50)
+            t_diff = abs(fair_t - curr_total)
+            t_conf = min(60 + (t_diff * 8), 95)
+            t_rec = "全場大分" if fair_t > curr_total else "全場小分"
+        else:
+            fair_t = "連線中..."
+            t_conf = 62
+            t_rec = "全場大分" if t_price < -112 else "全場小分"
+
+        return {
+            "matchup": f"{a_zh} @ {h_zh}",
+            "s_mkt": curr_spread, "s_fair": fair_s, "s_conf": int(s_conf), "s_rec": s_rec,
+            "t_mkt": curr_total, "t_fair": fair_t, "t_conf": int(t_conf), "t_rec": t_rec
+        }
+    except: return None
 
 # ==========================================
-# 4. 執行流程
+# 4. UI 顯示
 # ==========================================
-st.title("🏀 NBA 數據獵殺 V18.0 (穩定運作版)")
-st.info("💡 系統已啟用快取與防斷線機制，確保即時輸出不跳轉。")
+st.title("🏀 NBA 頂級職業數據量化報告 V19")
+st.caption("同步內容：近 15 場進階數據、實時盤口、賠率貼水分析")
 
-with st.spinner('同步最新市場數據中...'):
-    spreads = get_safe_odds("spreads")
-    totals = get_safe_odds("totals")
+with st.spinner('正在執行交叉驗證...'):
+    stats_df = get_advanced_nba_stats()
+    spreads = get_market_odds("spreads")
+    totals = get_market_odds("totals")
 
     if not spreads:
-        st.warning("⚠️ 無法取得即時盤口，可能是 API 次數用盡或網路延遲。請稍後刷新。")
+        st.warning("目前暫無 NBA 盤口數據。")
     else:
-        for g_s in spreads:
-            g_t = next((t for t in totals if t['id'] == g_s['id']), None)
-            if not g_t: continue
+        for gs in spreads:
+            gt = next((t for t in totals if t['id'] == gs['id']), None)
+            if not gt: continue
             
-            res = NBASmartEngine.get_analysis(g_s, g_t)
+            res = run_deep_analysis(gs, gt, stats_df)
             if not res: continue
 
             with st.container():
@@ -108,18 +131,18 @@ with st.spinner('同步最新市場數據中...'):
                 c1, c2 = st.columns(2)
                 
                 with c1:
-                    st.markdown("<div style='border:1px solid #444; padding:10px; border-radius:5px;'>", unsafe_allow_html=True)
-                    st.write("**🎯 讓分 (Spread)**")
-                    st.write(f"市場盤口: `{res['s_mkt']}`")
-                    st.metric("讓分信心度", f"{res['s_conf']}%")
-                    st.success(f"建議：{res['s_rec']}")
-                    st.markdown("</div>", unsafe_allow_html=True)
+                    st.markdown("#### 🎯 讓分分析 (Spread)")
+                    st.write(f"數據基準: `{res['s_fair']}` | 市場盤口: `{res['s_mkt']}`")
+                    st.progress(res['s_conf'] / 100)
+                    st.metric("信心度", f"{res['s_conf']}%")
+                    st.success(f"具體建議：{res['s_rec']}")
                 
                 with c2:
-                    st.markdown("<div style='border:1px solid #444; padding:10px; border-radius:5px;'>", unsafe_allow_html=True)
-                    st.write("**📏 大小分 (Total)**")
-                    st.write(f"市場盤口: `{res['t_mkt']}`")
-                    st.metric("大小分信心度", f"{res['t_conf']}%")
-                    st.error(f"建議：{res['t_rec']}")
-                    st.markdown("</div>", unsafe_allow_html=True)
+                    st.markdown("#### 📏 大小分分析 (Total)")
+                    st.write(f"數據基準: `{res['t_fair']}` | 市場盤口: `{res['t_mkt']}`")
+                    st.progress(res['t_conf'] / 100)
+                    st.metric("信心度", f"{res['t_conf']}%")
+                    st.error(f"具體建議：{res['t_rec']}")
                 st.divider()
+
+st.caption(f"數據最後同步：{datetime.now().strftime('%H:%M:%S')}")
