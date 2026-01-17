@@ -6,141 +6,135 @@ from datetime import datetime
 # ==========================================
 # 1. 系統環境與 API 配置
 # ==========================================
-st.set_page_config(page_title="籃球全聯盟市場分析 V14", layout="wide")
+st.set_page_config(page_title="NBA 頂級量化分析 V15", layout="wide")
 
-# 自動從 Secrets 讀取，若無則報錯
+# API Key 安全獲取
 try:
     API_KEY = st.secrets["THE_ODDS_API_KEY"]
 except Exception:
-    st.error("❌ 請在 Streamlit Secrets 中設定 THE_ODDS_API_KEY")
+    st.error("❌ 錯誤：請在 Streamlit Secrets 中設定 THE_ODDS_API_KEY")
     st.stop()
 
-if 'league' not in st.session_state:
-    st.session_state.league = None
-
-def set_league(l): st.session_state.league = l
-
-# 聯盟 API 對應表 (確認 key 與官方一致)
-LEAGUE_MAP = {
-    "NBA": "basketball_nba",
-    "KBL": "basketball_kbl",
-    "CBA": "basketball_cba",
-    "B.League": "basketball_bleague"
+# NBA 全球隊中文名稱映射表
+NBA_TEAM_MAP = {
+    'Atlanta Hawks': '老鷹', 'Boston Celtics': '塞爾提克', 'Brooklyn Nets': '籃網',
+    'Charlotte Hornets': '黃蜂', 'Chicago Bulls': '公牛', 'Cleveland Cavaliers': '騎士',
+    'Dallas Mavericks': '獨行俠', 'Denver Nuggets': '金塊', 'Detroit Pistons': '活塞',
+    'Golden State Warriors': '勇士', 'Houston Rockets': '火箭', 'Indiana Pacers': '溜馬',
+    'LA Clippers': '快艇', 'Los Angeles Clippers': '快艇', 'Los Angeles Lakers': '湖人',
+    'Memphis Grizzlies': '灰熊', 'Miami Heat': '熱火', 'Milwaukee Bucks': '公鹿',
+    'Minnesota Timberwolves': '灰狼', 'New Orleans Pelicans': '鵜鶘', 'New York Knicks': '尼克',
+    'Oklahoma City Thunder': '雷霆', 'Orlando Magic': '魔術', 'Philadelphia 76ers': '76人',
+    'Phoenix Suns': '太陽', 'Portland Trail Blazers': '拓荒者', 'Sacramento Kings': '國王',
+    'San Antonio Spurs': '馬刺', 'Toronto Raptors': '暴龍', 'Utah Jazz': '爵士',
+    'Washington Wizards': '巫師'
 }
 
 # ==========================================
-# 2. 逐場市場分析引擎 (嚴格職責分離)
+# 2. NBA 核心分析引擎
 # ==========================================
-class MarketEngineV14:
+class NBAMarketSniper:
     @staticmethod
-    def analyze_game(game_data, league):
-        home_team = game_data['home_team']
-        away_team = game_data['away_team']
-        
+    def get_zh_name(en_name):
+        return NBA_TEAM_MAP.get(en_name, en_name)
+
+    @staticmethod
+    def analyze_market(game):
         try:
-            # 抓取第一家博彩公司的盤口 (Spreads)
-            bookmaker = game_data['bookmakers'][0]
+            home_en = game['home_team']
+            away_en = game['away_team']
+            home_zh = NBA_TEAM_MAP.get(home_en, home_en)
+            away_zh = NBA_TEAM_MAP.get(away_en, away_en)
+            
+            # 獲取賠率數據
+            bookmaker = game['bookmakers'][0] # 使用標竿博彩公司
             market = bookmaker['markets'][0]
             outcomes = market['outcomes']
             
-            home_o = next(o for o in outcomes if o['name'] == home_team)
+            home_o = next(o for o in outcomes if o['name'] == home_en)
             spread = home_o['point']
             price = home_o['price']
             
-            # --- 市場心理分析邏輯 ---
-            # 1. 賠率壓力偵測 (熱門方賠率低於 -115)
-            is_heavy_pressure = price < -118
+            # --- 核心邏輯 ---
+            # 1. 信心指數計算
+            conf = 70
+            if price < -115: conf += 10 # 賠率壓力
+            if abs(spread) in [3, 7, 10]: conf += 5 # 關鍵數字停留
             
-            # 2. 信心指標
-            confidence = 65
-            if is_heavy_pressure: confidence += 15
-            
-            # 3. 推薦方向判定
-            if spread < 0:
-                direction = f"{home_team} 讓分 ({spread})"
-                intent = "莊家防禦主隊大勝" if is_heavy_pressure else "標竿平衡盤"
-            else:
-                direction = f"{home_team} 受讓 (+{spread})"
-                intent = "資金湧入受讓方" if is_heavy_pressure else "市場正常波動"
+            # 2. 意圖判定
+            intent = "正常市場波動"
+            if price < -120:
+                intent = "🚨 莊家賠付預警：資金過度集中"
+            elif abs(spread) < 2.5:
+                intent = "⚖️ 均勢盤口：勝負取決於關鍵球"
 
+            # 3. 推薦方向
+            rec = f"{home_zh} {'讓分' if spread < 0 else '受讓'} ({spread})"
+            
             return {
                 "success": True,
-                "summary": f"{away_team} @ {home_team}",
-                "rec": direction,
-                "conf": confidence,
-                "intent": intent,
+                "matchup": f"{away_zh} @ {home_zh}",
                 "spread": spread,
                 "price": price,
-                "is_bait": abs(spread) < 3.0 and price < -110
+                "conf": conf,
+                "intent": intent,
+                "rec": rec
             }
         except Exception:
             return {"success": False}
 
 # ==========================================
-# 3. 聯盟選擇入口
+# 3. UI 介面與實時抓取
 # ==========================================
-if st.session_state.league is None:
-    st.title("🏹 籃球全聯盟逐場市場掃描")
-    st.subheader("請選擇今日分析聯盟：")
-    cols = st.columns(4)
-    for i, (k, v) in enumerate(LEAGUE_MAP.items()):
-        with cols[i]:
-            if st.button(f"進入 {k}", use_container_width=True):
-                set_league(k)
-                st.rerun()
-    st.info("提示：NBA 以外的亞洲聯盟（CBA/KBL）通常在開賽前 4-6 小時才會釋出盤口數據。")
-    st.stop()
+st.title("🏀 NBA 職業量化市場分析報告")
+st.markdown("---")
 
-# ==========================================
-# 4. API 實時分析流程
-# ==========================================
-st.sidebar.title(f"🏀 {st.session_state.league}")
-if st.sidebar.button("⬅️ 返回聯盟選擇"):
-    st.session_state.league = None
-    st.rerun()
+# 側邊欄控制
+st.sidebar.header("系統參數")
+target_date = st.sidebar.date_input("選擇分析日期", datetime.now())
 
-league_key = LEAGUE_MAP[st.session_state.league]
-url = f"https://api.the-odds-api.com/v4/sports/{league_key}/odds/?apiKey={API_KEY}&regions=us&markets=spreads&oddsFormat=american"
+# API 請求
+url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds/?apiKey={API_KEY}&regions=us&markets=spreads&oddsFormat=american"
 
-st.header(f"🎯 {st.session_state.league} 逐場實時解析報告")
-
-with st.spinner(f'正在同步 {st.session_state.league} 實時盤口...'):
+with st.spinner('正在同步 NBA 最新實時盤口與賠率...'):
     response = requests.get(url)
-    raw_data = response.json()
+    raw_json = response.json()
 
-    # 修正錯誤：檢查 API 回傳是否為列表
-    if not isinstance(raw_data, list):
-        st.error(f"⚠️ API 回傳異常：{raw_data.get('message', '未知錯誤')}")
-        st.info("這通常代表目前該聯盟在 API 中暫無盤口數據，請稍後再試。")
-    elif len(raw_data) == 0:
-        st.warning(f"目前 {st.session_state.league} 暫無比賽或盤口尚未開出。")
+    # 嚴格檢查回傳格式
+    if not isinstance(raw_json, list):
+        st.error(f"API 異常：{raw_json.get('message', '未知錯誤')}")
+    elif len(raw_json) == 0:
+        st.warning("目前 API 中暫無當日 NBA 比賽數據。")
     else:
-        # 逐場進行 Loop 分析
-        for game in raw_data:
-            analysis = MarketEngineV14.analyze_game(game, st.session_state.league)
+        # 逐場掃描分析
+        sniper = NBAMarketSniper()
+        
+        for game in raw_json:
+            analysis = sniper.analyze_market(game)
             
             if not analysis["success"]:
                 continue
-                
+            
+            # 每一場比賽獨立呈現一個 Card
             with st.container():
-                st.markdown(f"### 🏟️ {analysis['summary']}")
+                st.subheader(f"🏟️ {analysis['matchup']}")
                 c1, c2, c3 = st.columns([1, 1, 2])
                 
                 with c1:
-                    st.write("**當前市場數據**")
-                    st.metric("Spread", analysis['spread'])
-                    st.write(f"賠率: {analysis['price']}")
+                    st.metric("實時盤口", analysis['spread'])
+                    st.write(f"當前賠率: {analysis['price']}")
                 
                 with c2:
-                    st.metric("信心度", f"{analysis['conf']}%")
+                    st.metric("分析信心度", f"{analysis['conf']}%")
                     st.write(f"**意圖：** {analysis['intent']}")
-                    
+                
                 with c3:
-                    st.subheader(f"✅ 推薦下注：{analysis['rec']}")
-                    if analysis['is_bait']:
-                        st.error("🚨 誘盤警告：盤口異常友善，謹慎下注。")
+                    st.markdown(f"### ✅ 建議：<span style='color:red'>{analysis['rec']}</span>", unsafe_allow_html=True)
+                    if analysis['conf'] >= 80:
+                        st.success("🔥 高價值推薦：市場信號極其強烈。")
                     else:
-                        st.success("📝 市場分析：目前盤口移動與數據邏輯吻合。")
+                        st.info("📝 穩健操作：建議控制倉位。")
+                
                 st.divider()
 
-st.caption(f"數據同步時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"數據自動更新於：{datetime.now().strftime('%H:%M:%S')}")
