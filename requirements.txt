@@ -4,3 +4,7 @@ nba_api
 streamlit
 matplotlib
 scipy
+pytesseract
+opencv-python-headless
+Pillow
+numpy
